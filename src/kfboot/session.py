@@ -120,6 +120,3 @@ class SessionUpgradeEnd:
         self.ctx.store.update_session(record)
 
         rep.media = record.to_api()
-        
-        # Delete the session
-        self.ctx.store.delete_session(record.eid)

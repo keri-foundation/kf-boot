@@ -104,9 +104,5 @@ def test_session_upgrade_success(client):
     assert body["status"] == "upgraded"
     assert body["principal"] == cid
 
-    # Step 6: Assert session was deleted after upgrade
-    resp = client.simulate_get(f"/session/{session_id}")
-    assert resp.status_code == 404 # Session not found after upgrade
-
     # Clean up for the next test
     client.ctx.store.close()
