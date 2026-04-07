@@ -36,6 +36,10 @@ class AuthMiddleware:
     def process_request(self, req: falcon.Request, _resp: falcon.Response) -> None:
         if req.path in {"/health", "/bootstrap/config"}:
             return
+        
+        # Don't require auth for public session endpoints
+        if req.path.startswith("/session"):
+            return
 
         principal = _caller_from_request(req)
         if not principal:

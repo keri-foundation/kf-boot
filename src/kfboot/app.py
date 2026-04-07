@@ -9,6 +9,7 @@ from kfboot.auth import AuthMiddleware, get_auth
 from kfboot.boot_client import BootClient, BootError
 from kfboot.config import Config
 from kfboot.store import Store, make_record
+from kfboot.session import SessionCollectionEnd, SessionResourceEnd, SessionUpgradeEnd
 
 
 def _page_int(req: falcon.Request, name: str, default: int) -> int:
@@ -364,6 +365,10 @@ def create_app(config: Config | None = None) -> tuple[falcon.App, Context]:
     app.add_route("/watchers", WatcherCollectionEnd(ctx))
     app.add_route("/watchers/{eid}", WatcherResourceEnd(ctx))
     app.add_route("/watchers/{eid}/status", WatcherStatusEnd(ctx))
+    app.add_route("/session", SessionCollectionEnd(ctx))
+    app.add_route("/session/{session_id}", SessionResourceEnd(ctx))
+    app.add_route("/session/{session_id}/upgrade", SessionUpgradeEnd(ctx))
+
     return app, ctx
 
 

@@ -35,6 +35,52 @@ class BindingRecord:
     cid: str = ""
 
 
+@dataclass
+class SessionRecord:
+    """
+    Represents a single onboarding session in the boot‑server flow.
+
+    A session begins with an ephemeral principal (client‑generated AID),
+    includes a server‑generated challenge, and may later be upgraded to a
+    permanent AID once the client proves control of its key material.
+
+    Attributes:
+        eid: Unique session identifier assigned by the server.
+        created_at: Unix timestamp when the session was created.
+        expires_at: Unix timestamp when the session becomes invalid.
+        upgraded_principal: Permanent AID after successful upgrade, or None.
+        challenge: Challenge string the client must sign to upgrade.
+    """
+
+    eid: str
+    created_at: int
+    expires_at: int
+    upgraded_principal: str | None = None
+    challenge: str | None = None
+
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "session_id": self.eid,
+            "status": self.status,
+            "expires_at": self.expires_at,
+            "principal": self.upgraded_principal,
+        }
+
+    @property
+    def is_expired(self) -> bool:
+        from time import time
+        return int(time()) >= self.expires_at
+
+    @property
+    def status(self) -> str:
+        if self.upgraded_principal:
+            return "upgraded"
+        if self.is_expired:
+            return "expired"
+        return "pending"
+
+
 class PlatformBaser(dbing.LMDBer):
     """LMDB database for the KF platform service."""
 
@@ -60,11 +106,19 @@ class PlatformBaser(dbing.LMDBer):
             db=self,
             subkey="resc.",
             klas=ResourceRecord,
+            schema= None,
         )
         self.bindings = koming.Komer(
             db=self,
             subkey="bind.",
             klas=BindingRecord,
+            schema= None
+        )
+        self.sessions = koming.Komer(
+            db=self,
+            subkey="sess.",
+            klas=SessionRecord,
+            schema= SessionRecord,
         )
 
         return self.env

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import math
+import secrets
+import time
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
-from kfboot.basing import BindingRecord, ResourceRecord, open_baser
+from kfboot.basing import BindingRecord, ResourceRecord, open_baser, SessionRecord
 
+SESSION_TTL_SECONDS = 5 * 60  # 5 minutes
 
 def now_iso() -> str:
     return datetime.now(UTC).isoformat()
@@ -55,7 +58,7 @@ class Store:
         self.baser.resources.rem(keys=(kind, eid))
 
     def count_resources(self, kind: str) -> int:
-        return sum(1 for _, _ in self.baser.resources.getTopItemIter(keys=(kind,), topive=True))
+        return sum(1 for _, _ in self.baser.resources.getItemIter(keys=(kind,)))
 
     def list_resources(
         self,
@@ -69,7 +72,7 @@ class Store:
         order: list[str] | None,
     ) -> dict[str, Any]:
         records = [
-            record for _, record in self.baser.resources.getTopItemIter(keys=(kind,), topive=True)
+            record for _, record in self.baser.resources.getItemIter(keys=(kind,))
             if self._visible(record, principal, is_admin)
         ]
 
@@ -109,6 +112,37 @@ class Store:
             or record.cid == principal
             or self.baser.bindings.get(keys=(principal, record.cid)) is not None
         )
+
+    def add_session(self) -> SessionRecord:
+        eid = _new_session_id()
+        principal = _new_ephemeral_principal()
+        now = int(time.time())
+        expires_at = now + SESSION_TTL_SECONDS
+
+        record = SessionRecord(
+            eid=eid,
+            created_at=now,
+            expires_at=expires_at,
+            upgraded_principal=None,
+        )
+        self.baser.sessions.pin(keys=(eid,), val=record)
+        return record
+
+    def get_session(self, eid: str) -> SessionRecord | None:
+        return self.baser.sessions.get(keys=(eid))
+
+    def update_session(self, record: SessionRecord) -> None:
+        self.baser.sessions.pin(keys=(record.eid), val=record)
+
+    def delete_session(self, eid: str) -> None:
+        self.baser.sessions.rem(keys=(eid))
+
+def _new_session_id() -> str:
+    return f"sess_{secrets.token_urlsafe(16)}"
+
+
+def _new_ephemeral_principal() -> str:
+    return f"ephem_{secrets.token_urlsafe(16)}"
 
 
 def make_record(
