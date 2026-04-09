@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import falcon
+from keri.app.habbing import Habery
 
 from kfboot.auth import AuthMiddleware, get_auth
 from kfboot.boot_client import BootClient, BootError
 from kfboot.config import Config
 from kfboot.store import Store, make_record
 from kfboot.session import SessionCollectionEnd, SessionResourceEnd, SessionUpgradeEnd
-
 
 def _page_int(req: falcon.Request, name: str, default: int) -> int:
     value = req.get_param(name)
@@ -75,6 +75,8 @@ class Context:
     store: Store
     witness_boot: BootClient
     watcher_boot: BootClient
+    habery: Habery
+    hostHab: Any
 
 
 class HealthEnd:
@@ -345,14 +347,21 @@ class WatcherStatusEnd:
             raise _boot_error(exc)
 
 
-def create_app(config: Config | None = None) -> tuple[falcon.App, Context]:
+def create_app(config: Config | None = None, temp=True) -> tuple[falcon.App, Context]:
     config = config or Config.from_env()
     store = Store(config.db_path)
+    # Create the server’s KERI environment
+    habery = Habery(name="boot", temp=temp)
+
+    # Create the server’s AID (hostHab)
+    hostHab = habery.makeHab(name="boot")
     ctx = Context(
         config=config,
         store=store,
         witness_boot=BootClient(config.wit_boot_url),
         watcher_boot=BootClient(config.wat_boot_url),
+        habery=habery,
+        hostHab=hostHab,
     )
 
     app = falcon.App(middleware=[AuthMiddleware(config)])
@@ -367,7 +376,7 @@ def create_app(config: Config | None = None) -> tuple[falcon.App, Context]:
     app.add_route("/watchers/{eid}/status", WatcherStatusEnd(ctx))
     app.add_route("/session", SessionCollectionEnd(ctx))
     app.add_route("/session/{session_id}", SessionResourceEnd(ctx))
-    app.add_route("/session/{session_id}/upgrade", SessionUpgradeEnd(ctx))
+    app.add_route("/session/upgrade", SessionUpgradeEnd(ctx))
 
     return app, ctx
 
