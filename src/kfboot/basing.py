@@ -57,14 +57,20 @@ class SessionRecord:
     expires_at: int
     upgraded_principal: str | None = None
     challenge: str | None = None
+    
+    state: str = "created"
+    witness_ids: list[str] = None
+    watcher_id: str | None = None
+    account_aid: str | None = None
 
-
-    def to_api(self) -> dict[str, Any]:
+    def to_api(self):
         return {
             "session_id": self.eid,
-            "status": self.status,
+            "state": self.state,
+            "witness_ids": self.witness_ids or [],
+            "watcher_id": self.watcher_id,
+            "principal": self.account_aid,
             "expires_at": self.expires_at,
-            "principal": self.upgraded_principal,
         }
 
     @property

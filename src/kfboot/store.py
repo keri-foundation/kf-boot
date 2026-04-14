@@ -115,7 +115,6 @@ class Store:
 
     def add_session(self) -> SessionRecord:
         eid = _new_session_id()
-        principal = _new_ephemeral_principal()
         now = int(time.time())
         expires_at = now + SESSION_TTL_SECONDS
 
@@ -124,6 +123,10 @@ class Store:
             created_at=now,
             expires_at=expires_at,
             upgraded_principal=None,
+            state="started",
+            witness_ids=[],
+            watcher_id=None,
+            account_aid=None,
         )
         self.baser.sessions.pin(keys=(eid,), val=record)
         return record
@@ -131,7 +134,13 @@ class Store:
     def get_session(self, eid: str) -> SessionRecord | None:
         return self.baser.sessions.get(keys=(eid))
 
-    def update_session(self, record: SessionRecord) -> None:
+    def update_session(self, session_id: str, **fields) -> None:
+        record = self.get_session(session_id)
+        if record is None:
+            raise ValueError(f"Session {session_id} not found")
+
+        for key, value in fields.items():
+            setattr(record, key, value)
         self.baser.sessions.pin(keys=(record.eid), val=record)
 
     def delete_session(self, eid: str) -> None:

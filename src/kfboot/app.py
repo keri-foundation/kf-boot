@@ -6,11 +6,11 @@ from typing import Any
 import falcon
 from keri.app.habbing import Habery
 
-from kfboot.auth import AuthMiddleware, get_auth
 from kfboot.boot_client import BootClient, BootError
 from kfboot.config import Config
 from kfboot.store import Store, make_record
-from kfboot.session import SessionCollectionEnd, SessionResourceEnd, SessionUpgradeEnd
+from kfboot.onboarding import OnboardingEnd
+from kfboot.boot_exchanger import BootExchanger
 
 def _page_int(req: falcon.Request, name: str, default: int) -> int:
     value = req.get_param(name)
@@ -69,7 +69,7 @@ def _capacity_error(kind: str, limit: int, count: int, requested: int) -> falcon
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class Context:
     config: Config
     store: Store
@@ -347,14 +347,16 @@ class WatcherStatusEnd:
             raise _boot_error(exc)
 
 
-def create_app(config: Config | None = None, temp=True) -> tuple[falcon.App, Context]:
+def create_app(config: Config | None = None, temp=False) -> tuple[falcon.App, Context]:
     config = config or Config.from_env()
     store = Store(config.db_path)
+    
     # Create the server’s KERI environment
     habery = Habery(name="boot", temp=temp)
 
     # Create the server’s AID (hostHab)
     hostHab = habery.makeHab(name="boot")
+
     ctx = Context(
         config=config,
         store=store,
@@ -364,9 +366,19 @@ def create_app(config: Config | None = None, temp=True) -> tuple[falcon.App, Con
         hostHab=hostHab,
     )
 
-    app = falcon.App(middleware=[AuthMiddleware(config)])
+    # Create the boot exchanger
+    ctx.exchanger = BootExchanger(ctx)
+    # Wire BootExchanger into Kevery and Parser
+    ctx.habery.kvy.exc = ctx.exchanger
+    ctx.habery.psr.exc = ctx.exchanger
+    
+    # Falcon App
+    app = falcon.App()
+
+    # Public discovery
     app.add_route("/health", HealthEnd())
     app.add_route("/bootstrap/config", BootstrapConfigEnd(ctx))
+
     app.add_route("/capacity/witopnet", CapacityEnd(ctx, "witness"))
     app.add_route("/capacity/watopnet", CapacityEnd(ctx, "watcher"))
     app.add_route("/witnesses", WitnessCollectionEnd(ctx))
@@ -374,10 +386,9 @@ def create_app(config: Config | None = None, temp=True) -> tuple[falcon.App, Con
     app.add_route("/watchers", WatcherCollectionEnd(ctx))
     app.add_route("/watchers/{eid}", WatcherResourceEnd(ctx))
     app.add_route("/watchers/{eid}/status", WatcherStatusEnd(ctx))
-    app.add_route("/session", SessionCollectionEnd(ctx))
-    app.add_route("/session/{session_id}", SessionResourceEnd(ctx))
-    app.add_route("/session/upgrade", SessionUpgradeEnd(ctx))
 
+    # CESR ingress endpoint
+    app.add_route("/onboarding", OnboardingEnd(ctx))
     return app, ctx
 
 

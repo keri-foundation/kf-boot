@@ -2,8 +2,16 @@ import pytest
 from falcon import testing
 import json
 
-from keri.core import Prefixer, Verfer, Siger, Salter, Signer, MtrDex, coring
+from keri.core import Prefixer, Verfer, Siger, Salter, Signer, MtrDex, coring, eventing, Codens
+from keri.core.coring import Seqner, Saider, Pather
+from keri.kering import Vrsn_1_0
 from keri.end import ending
+from keri.app.habbing import Habery
+from keri.core.eventing import SealEvent
+from keri.help import helping
+from keri.peer import exchanging
+from keri.core.counting import Counter, CtrDex_1_0
+from keri.core.serdering import SerderKERI
 
 from kfboot.app import create_app   
 
@@ -25,163 +33,354 @@ def client():
     ctx.habery.close(clear=True)
     ctx.store.close()
 
-def make_signature_header_from_sigers(sigers):
-    """
-    Construct a CESR-compliant HTTP Signature header from one or more Siger objects.
+def sign_exn(hab, serder) -> bytearray:
+    """Sign an EXN message with a Hab and return a mutable CESR bytearray."""
+    sigs = hab.sign(ser=serder.raw, indexed=True)
+    msg = bytearray(serder.raw)
+    for sig in sigs:
+        msg.extend(sig.qb64b)
+    return msg
 
-    The function:
-      - Assigns numeric markers ("0", "1", ...) to each Siger
-      - Wraps them in a Signage structure
-      - Serializes the signage into a `Signature:` header value
 
-    Args:
-        sigers (Iterable[Siger]): One or more indexed signatures.
 
-    Returns:
-        dict: A mapping containing the `Signature` header.
-    """
-    markers = {str(i): siger for i, siger in enumerate(sigers)}
+def build_exn_with_cigar(hab, serder):
+    # Create a non-transferable signature (cigar)
+    cigar = hab.sign(ser=serder.raw, indexed=False)[0]   # Cigar
+    verfer = Verfer(qb64=hab.pre)                        # Public key
 
-    signage = ending.Signage(
-        markers=markers,
-        indexed=True,
-        signer=None,
-        ordinal=None,
-        digest=None,
-        kind=None,
+    msg = bytearray(serder.raw)
+
+    # Add NonTransReceiptCouples counter
+    msg.extend(
+        Counter(
+            CtrDex_1_0.NonTransReceiptCouples,
+            count=1,
+            version=Vrsn_1_0,
+        ).qb64b
     )
 
-    return ending.signature([signage])
+    # Add verfer + cigar
+    msg.extend(verfer.qb64b)
+    msg.extend(cigar.qb64b)
+
+    return bytes(msg)
 
 
-def test_session_upgrade_success(client):
+def build_exn_with_tsgs(hab, serder, end: bytes) -> bytes:
     """
-    End‑to‑end test of the bootserver session upgrade protocol.
+    Build a fully valid EXN with transferable signature groups (tsgs)
+    for a transferable AID (permanent account AID).
 
-    This test verifies the full cryptographic handshake:
-
-    1. Client creates an ephemeral AID.
-    2. Client SAID‑ifies and signs the session creation request.
-    3. Server verifies the signature and returns a signed session record.
-    4. Test recomputes the SAID of the response and verifies the server signature.
-    5. Client generates a permanent AID.
-    6. Client SAID‑ifies and signs the upgrade request (binding cid + session_id).
-    7. Server verifies the permanent AID signature and upgrades the session.
-    8. Test recomputes the SAID of the upgrade response and verifies the server signature.
-
-    This ensures:
-      - Request integrity (SAID correctness)
-      - Signature correctness (ephemeral + permanent)
-      - Server authenticity (hostHab signature)
-      - Session binding correctness (session_id included in signed material)
+    - Uses TransIdxSigGroups for tsgs
+    - Includes prefixer, seqner, saider, and ControllerIdxSigs + sigers
     """
-    
-    # Create ephemeral AID
-    ephSigner = Signer()                 # ephemeral keypair
-    ephVerfer = ephSigner.verfer
-    ephPrefix = Prefixer(raw=ephVerfer.raw, code=ephVerfer.code).qb64
-    
-    # Build body
-    body = {
-        "i": ephPrefix,
-        "ts": "2026-04-08T12:00:00Z",
-        "d": ""                           # placeholder for SAID
-    }
+    end = end or b""
+    # Sign EXN body with indexed signatures
+    sigers = hab.sign(ser=serder.raw, indexed=True)
 
-    # Saidify body inside d
-    saider, body  = coring.Saider.saidify(sad=body, label="d")
-    said = saider.qb64
-    
-    # Sign SAID with ephemeral key
-    sigers = ephSigner.sign(ser=said.encode("utf-8"), index=0)
-    header = make_signature_header_from_sigers([sigers])
+    # Signer identity (transferable AID)
+    prefixer = Prefixer(qb64=hab.pre)
+    seqner = Seqner(sn=hab.kever.sn)                 # current est event sequence
+    saider = Saider(qb64=hab.kever.serder.said)      # current est event digest
 
-    # Send the POST request, first contact
-    resp = client.simulate_post("/session", json=body, headers={"Signature": header["Signature"]})
-    assert resp.status_code == 201
+    msg = bytearray(serder.raw)
 
-    # Assert server response and signature
-    data = resp.json
+    # Add embedded attachments from exchanging.exchange (end)
+    msg.extend(end)
 
-    # Extract signature header
-    sig_header = resp.headers.get("Signature")
-    assert sig_header is not None
-
-    # Parse Siger from header
-    signages = ending.designature(sig_header)
-    signage = signages[0]
-    server_siger = list(signage.markers.values())[0]
-
-    # Recompute SAID of the response body
-    resp_saider, _ = coring.Saider.saidify(sad=dict(data), label="d")
-    resp_said = resp_saider.qb64
-
-    # Get server's public key
-    server_verfer = client.ctx.hostHab.kever.verfers[0]
-
-    # Verify signature
-    assert server_verfer.verify(server_siger.raw, resp_said.encode("utf-8"))
-
-    # Assert status
-    assert data["status"] == "pending"
-    
-    # Get the session ID from the server response
-    sessionId = data["session_id"]
-
-    # Create a Random permanent AID 
-    permSigner = Signer()
-    permVerfer = permSigner.verfer
-
-    # Build permanent AID prefix
-    permPrefixer = Prefixer(raw=permVerfer.raw, code=permVerfer.code)
-    cid = permPrefixer.qb64
-    
-    # Build + SAID-ify /upgrade body
-    upgradeBody = {
-        "cid": cid,
-        "session_id": sessionId,
-        "d": ""
-    }
-
-    # Saidify the body and put it in label d
-    upgradeSaider, upgradeBody = coring.Saider.saidify(sad=upgradeBody, label="d")
-    upgradeSaid = upgradeSaider.qb64
-
-    # Sign SAID with permanent key
-    permSiger = permSigner.sign(ser=upgradeSaid.encode("utf-8"), index=0)
-    permHeader = make_signature_header_from_sigers([permSiger])
-
-    # Send upgrade request with the signature header and permanent AID
-    resp2 = client.simulate_post(
-        f"/session/upgrade",
-        json=upgradeBody,
-        headers={"Signature": permHeader["Signature"]},
+    # TransIdxSigGroups (one group)
+    msg.extend(
+        Counter(
+            CtrDex_1_0.TransIdxSigGroups,
+            count=1,
+            version=Vrsn_1_0,
+        ).qb64b
     )
 
-    # Assert Validate success
-    assert resp2.status_code == 200
+    # prefixer + seqner + saider for this tsg
+    msg.extend(prefixer.qb64b)
+    msg.extend(seqner.qb64b)
+    msg.extend(saider.qb64b)
 
-    # Assert server response and signature
-    data = resp2.json
+    # ControllerIdxSigs
+    msg.extend(
+        Counter(
+            CtrDex_1_0.ControllerIdxSigs,
+            count=len(sigers),
+            version=Vrsn_1_0,
+        ).qb64b
+    )
 
-    # Extract signature header
-    sig_header = resp2.headers.get("Signature")
-    assert sig_header is not None
+    # signatures
+    for siger in sigers:
+        msg.extend(siger.qb64b)
 
-    # Parse Siger from header
-    signages = ending.designature(sig_header)
-    signage = signages[0]
-    server_siger = list(signage.markers.values())[0]
+    return bytes(msg)
 
-    # Recompute SAID of the response body
-    resp_saider, _ = coring.Saider.saidify(sad=dict(data), label="d")
-    resp_said = resp_saider.qb64
+def post_cesr(client, msg: bytes):
+    return client.simulate_post(
+        "/onboarding",
+        body=msg,
+        headers={"Content-Type": "application/cesr"},
+    )
 
-    # Get server's public key
-    server_verfer = client.ctx.hostHab.kever.verfers[0]
 
-    # Verify signature
-    assert server_verfer.verify(server_siger.raw, resp_said.encode("utf-8"))
+def test_onboarding_end_accepts_inception(client):
+    """
+    Verify that OnboardingEnd:
+      - accepts a valid KERI inception event
+      - parses it without raising
+      - returns HTTP 200
+      - returns no EXN reply (correct for inception)
+    """
 
-    assert data["status"] == "upgraded"
-    assert data["principal"] == cid
+    # 1. Create ephemeral AID
+    eph_hby = Habery(name="eph", temp=True)
+    eph = eph_hby.makeHab(name="eph")
+
+    # 2. Fully framed, signed inception event
+    icp_msg = eph.makeOwnInception()
+
+    # 3. POST to /onboarding
+    resp = client.simulate_post(
+        "/onboarding",
+        body=icp_msg,
+        headers={"Content-Type": "application/cesr"},
+    )
+
+    # 4. Endpoint must accept inception events
+    assert resp.status_code == 200
+
+    # 5. Inception events do NOT produce EXN replies
+    assert resp.content == b""
+
+def test_onboarding_end_invalid_cesr(client):
+    """
+    OnboardingEnd does not reject malformed CESR messages with HTTP 400.
+    """
+
+    # Not CESR at all
+    bad = b"A"
+
+    resp = client.simulate_post(
+        "/onboarding",
+        body=bad,
+        headers=[("Content-Type", "application/cesr")],
+    )
+
+    assert resp.status_code == 400
+    assert b"Invalid CESR message" in resp.content
+
+
+def test_onboarding_end_rejects_empty_body(client):
+    """
+    OnboardingEnd must reject empty POST bodies.
+    """
+
+    resp = client.simulate_post(
+        "/onboarding",
+        body=b"",
+        headers={"Content-Type": "application/cesr"},
+    )
+
+    assert resp.status_code == 400
+    assert b"Missing CESR message" in resp.content
+
+
+def test_onboarding_end_inception_produces_no_cues(client):
+    """
+    After posting an inception event, the exchanger must have no cues.
+    """
+
+    eph_hby = Habery(name="eph", temp=True)
+    eph = eph_hby.makeHab(name="eph")
+
+    icp_msg = eph.makeOwnInception()
+
+    resp = client.simulate_post(
+        "/onboarding",
+        body=icp_msg,
+        headers={"Content-Type": "application/cesr"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.content == b""
+
+    # The BootExchanger must not have produced any cues
+    assert not client.ctx.exchanger.cues
+
+
+def test_full_onboarding_flow(client):
+    """
+    End‑to‑end test of the complete onboarding protocol.
+
+    This test exercises the full EXN‑driven onboarding flow between a client
+    (ephemeral and permanent AIDs) and the boot server. It verifies that:
+
+    1. An ephemeral non‑transferable AID can incept and be accepted by the
+       /onboarding endpoint without producing any EXN reply.
+
+    2. The client can initiate a new onboarding session via
+       /onboarding/session/start, and the boot server returns a valid EXN
+       reply containing:
+           - a newly allocated session_id
+           - witness pool allocation
+           - watcher allocation
+           - updated session state
+
+    3. The client can query the session state via
+       /onboarding/session/status and receive a valid EXN reply reflecting
+       the server’s stored session state.
+
+    4. A permanent (transferable) AID can incept on the boot server and then
+       authenticate an EXN request to /onboarding/account/create using a
+       fully‑formed transferable signature group (tsgs). The server must:
+           - authenticate the EXN
+           - update the session with the permanent account AID
+           - return a non‑empty EXN reply
+
+    5. The permanent AID can complete onboarding via
+       /onboarding/complete, again authenticated with tsgs, and the server
+       must:
+           - validate that the permanent AID matches the session principal
+           - validate that witness and watcher resources exist
+           - transition the session to "completed"
+           - return a non‑empty EXN reply
+
+    The test asserts that each EXN‑based step returns HTTP 200 and that all
+    EXN‑producing endpoints return a non‑empty CESR payload, confirming that
+    the BootExchanger dispatched the EXN to the correct handler and produced
+    a reply cue.
+    """
+    eph_hby = Habery(name="eph", temp=True)
+    eph = eph_hby.makeHab(name="eph", transferable=False)
+
+    # 1. Inception
+    icp = eph.makeOwnInception()
+    resp = post_cesr(client, icp)
+    assert resp.status_code == 200
+    assert resp.content == b""
+
+    # 2. Session start
+    serder_start, atc_start = exchanging.exchange(
+        route="/onboarding/session/start",
+        payload={},
+        sender=eph.pre,
+    )
+
+    msg_start = build_exn_with_cigar(eph, serder_start)
+    resp = post_cesr(client, msg_start)
+    assert resp.status_code == 200
+    assert resp.content != b""
+
+    # Assert reply
+    reply = SerderKERI(raw=resp.content)
+    assert reply.ked["t"] == "exn"
+    assert reply.ked["rp"] == eph.pre
+    assert reply.ked["r"] == "/onboarding/session/start"
+    assert reply.ked["t"] == "exn"
+    assert reply.ked["i"] == client.ctx.hostHab.pre
+    
+    payload = reply.ked["a"]
+    assert payload["i"] == eph.pre                  # Echoes ephemeral AID
+    assert payload["session_id"].startswith("sess_")
+    assert payload["state"] == "witness_pool_allocated"
+    
+    # Get session ID
+    session_id = payload["session_id"]
+
+    # 3. Session status
+    serder_status, atc_status = exchanging.exchange(
+        route="/onboarding/session/status",
+        payload={"session_id": session_id},
+        sender=eph.pre,
+    )
+    msg_status = build_exn_with_cigar(eph, serder_status)
+    resp = post_cesr(client, msg_status)
+    assert resp.status_code == 200
+    assert resp.content != b""
+
+    reply = SerderKERI(raw=resp.content)
+    ked = reply.ked
+    payload = ked["a"]
+
+    # Top-level EXN correctness
+    assert ked["t"] == "exn"
+    assert ked["r"] == "/onboarding/session/status" # Assert route
+    assert ked["rp"] == eph.pre                     # reply addressed to ephemeral AID
+    assert ked["i"] == client.ctx.hostHab.pre       # signed by boot server
+    assert ked["q"] == {}
+    assert ked["e"] == {}
+
+    #  Payload correctness 
+    assert payload["session_id"] == session_id
+    assert payload["state"] == "witness_pool_allocated"
+
+    # 4. Account create (permanent AID)
+    perm_hby = Habery(name="perm", temp=True)
+    perm = perm_hby.makeHab(name="perm")
+
+    # Incept perm on the boot server
+    perm_icp = perm.makeOwnInception()
+    resp = post_cesr(client, perm_icp)
+    assert resp.status_code == 200
+    serder_create, atc_create = exchanging.exchange(
+        route="/onboarding/account/create",
+        payload={"session_id": session_id},
+        sender=perm.pre,
+    )
+    msg_create = build_exn_with_tsgs(perm, serder_create, atc_create)
+    resp = post_cesr(client, msg_create)
+    assert resp.status_code == 200
+    assert resp.content != b""
+
+    reply = SerderKERI(raw=resp.content)
+    ked = reply.ked
+    payload = ked["a"]
+
+    # Top-level EXN correctness 
+    assert ked["t"] == "exn"
+    assert ked["r"] == "/onboarding/account/create"
+    assert ked["rp"] == perm.pre                    # reply addressed to permanent AID
+    assert ked["i"] == client.ctx.hostHab.pre       # signed by boot server
+    assert isinstance(ked["d"], str) and len(ked["d"]) > 20
+
+    # Payload correctness 
+    assert payload["session_id"] == session_id
+    assert payload["principal"] == perm.pre         # permanent AID is now principal
+    assert payload["state"] == "account_created"
+
+    # Server-side session state 
+    session = client.ctx.store.get_session(session_id)
+    assert session.account_aid == perm.pre
+    assert session.state == "account_created"
+
+    # 5. Complete
+    serder_complete, atc_complete = exchanging.exchange(
+        route="/onboarding/complete",
+        payload={"session_id": session_id},
+        sender=perm.pre,
+    )
+    msg_complete = build_exn_with_tsgs(perm, serder_complete, atc_complete)
+    resp = post_cesr(client, msg_complete)
+    assert resp.status_code == 200
+    assert resp.content != b""
+    reply = SerderKERI(raw=resp.content)
+    ked = reply.ked
+    payload = ked["a"]
+
+    # Top-level EXN correctness 
+    assert ked["t"] == "exn"
+    assert ked["r"] == "/onboarding/complete"
+    assert ked["rp"] == perm.pre                    # reply addressed to permanent AID
+    assert ked["i"] == client.ctx.hostHab.pre       # signed by boot server
+    assert isinstance(ked["d"], str) and len(ked["d"]) > 20
+
+    # Payload correctness
+    assert payload["session_id"] == session_id
+    assert payload["principal"] == perm.pre
+    assert payload["state"] == "completed"
+
+    # Server-side session state
+    session = client.ctx.store.get_session(session_id)
+    assert session.state == "completed"

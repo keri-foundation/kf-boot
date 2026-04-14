@@ -50,10 +50,10 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
-        wit_boot_url = _env("WIT_BOOT_URL", "http://127.0.0.1") 
-        wit_public_url = _env("WIT_PUBLIC_URL", "http://127.0.0.1")
-        wat_boot_url = _env("WAT_BOOT_URL", "http://127.0.0.1")
-        wat_public_url = _env("WAT_PUBLIC_URL", "http://127.0.0.1")
+        wit_boot_url = _env("WIT_BOOT_URL", "http://127.0.0.1:5631") 
+        wit_public_url = _env("WIT_PUBLIC_URL", "http://127.0.0.1:5632")
+        wat_boot_url = _env("WAT_BOOT_URL", "http://127.0.0.1:7631")
+        wat_public_url = _env("WAT_PUBLIC_URL", "http://127.0.0.1:7632")
 
         return cls(
             host=_env("HOST", "127.0.0.1"),
