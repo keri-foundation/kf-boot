@@ -112,13 +112,13 @@ class PlatformBaser(dbing.LMDBer):
             db=self,
             subkey="resc.",
             klas=ResourceRecord,
-            schema= None,
+            schema= ResourceRecord,
         )
         self.bindings = koming.Komer(
             db=self,
             subkey="bind.",
             klas=BindingRecord,
-            schema= None
+            schema= BindingRecord
         )
         self.sessions = koming.Komer(
             db=self,

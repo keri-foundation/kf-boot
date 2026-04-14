@@ -49,7 +49,10 @@ class Store:
         )
 
     def add_resource(self, record: ResourceRecord) -> None:
-        self.baser.resources.pin(keys=(record.kind, record.eid), val=record)
+        try:
+            self.baser.resources.pin(keys=(record.kind, record.eid), val=record)
+        except Exception as e:
+            raise
 
     def get_resource(self, kind: str, eid: str) -> ResourceRecord | None:
         return self.baser.resources.get(keys=(kind, eid))
@@ -141,7 +144,10 @@ class Store:
 
         for key, value in fields.items():
             setattr(record, key, value)
-        self.baser.sessions.pin(keys=(record.eid), val=record)
+        try:
+            self.baser.sessions.pin(keys=(record.eid,), val=record)
+        except Exception as e:
+            raise
 
     def delete_session(self, eid: str) -> None:
         self.baser.sessions.rem(keys=(eid))

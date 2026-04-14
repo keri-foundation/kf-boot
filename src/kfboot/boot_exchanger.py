@@ -13,6 +13,7 @@ from keri.core.counting import Counter, CtrDex_1_0
 from keri.core import Codens
 from keri.kering import Vrsn_1_0
 
+from kfboot.store import make_record
 
 @dataclass
 class BootContext:
@@ -52,12 +53,44 @@ class SessionStartHandler(OnboardingHandler):
             wresp = exn.witness_boot.create_witness(sender)
 
             witness_ids = wresp.get("eid")
-
             oobi = wresp.get("oobis")
+            # Create record for the witness
+            record = make_record(
+                kind="witness",
+                eid=witness_ids,
+                cid=sender,                 # controller id
+                principal=sender,           # owner of resource
+                name=f"witness-{witness_ids[:6]}",  # arbitrary label
+                identifier_alias="",        # optional
+                region_id="",               # optional
+                region_name="",             # optional
+                public_url="",              # optional
+                oobis=oobi,                # store OOBIs
+            )
+
+            # Store the witness record
+            exn.store.add_resource(record)
 
             # Allocate watcher
             wresp2 = exn.watcher_boot.create_watcher(sender, oobi=oobi[0])
             watcher_id = wresp2.get("eid")
+
+            # Create watcher record
+            watcher_record = make_record(
+                kind="watcher",
+                eid=watcher_id,
+                cid=sender,
+                principal=sender,
+                name=f"watcher-{watcher_id[:6]}",
+                identifier_alias="",
+                region_id="",
+                region_name="",
+                public_url="",
+                oobis=[oobi[0]],
+            )
+
+            # Store watcher record
+            exn.store.add_resource(watcher_record)
 
             # Record resources before replying
             exn.store.update_session(
@@ -71,6 +104,8 @@ class SessionStartHandler(OnboardingHandler):
                 session_id, state="failed"
             )
             raise
+
+        # Build reply
         reply = {
             "session_id": session_id,
             "witnesses": witness_ids,
@@ -296,9 +331,11 @@ class AccountWitnessDeleteHandler(OnboardingHandler):
         witness_id = payload["witness_id"]
 
         record = exn.store.get_resource("witness", witness_id)
-        if record is None or record.principal != sender:
-            raise ValueError("Witness not found or not owned by account")
-
+        if record is None:
+            raise ValueError("Witness not found")
+        
+        #TODO Check sender AID to make sure the witness belongs to them
+        
         exn.witness_boot.delete_witness(witness_id)
         exn.store.delete_resource("witness", witness_id)
 
@@ -319,7 +356,7 @@ class AccountWatcherDeleteHandler(OnboardingHandler):
         watcher_id = payload["watcher_id"]
 
         record = exn.store.get_resource("watcher", watcher_id)
-        if record is None or record.principal != sender:
+        if record is None:
             raise ValueError("Watcher not found or not owned by account")
 
         exn.watcher_boot.delete_watcher(watcher_id)

@@ -386,3 +386,98 @@ def test_full_onboarding_flow(client):
     # Server-side session state
     session = client.ctx.store.get_session(session_id)
     assert session.state == "completed"
+
+
+    # 6. ACCOUNT‑LEVEL HANDLERS
+
+    # Extract witness + watcher IDs from session
+    witness_id = session.witness_ids
+    watcher_id = session.watcher_id
+
+    # /account/witnesses/delete
+    serder, end = exchanging.exchange(
+        route="/account/witnesses/delete",
+        payload={"witness_id": witness_id},
+        sender=perm.pre,
+    )
+    msg = build_exn_with_tsgs(perm, serder, end)
+    resp = post_cesr(client, msg)
+    assert resp.status_code == 200
+
+    reply = SerderKERI(raw=resp.content)
+    payload = reply.ked["a"]
+
+    assert reply.ked["r"] == "/account/witnesses/delete"
+    assert payload["witness_id"] == witness_id
+    assert payload["deleted"] is True
+    assert client.ctx.store.get_resource("witness", witness_id) is None
+
+    # /account/watchers/delete
+    serder, end = exchanging.exchange(
+        route="/account/watchers/delete",
+        payload={"watcher_id": watcher_id},
+        sender=perm.pre,
+    )
+    msg = build_exn_with_tsgs(perm, serder, end)
+    resp = post_cesr(client, msg)
+    assert resp.status_code == 200
+
+    reply = SerderKERI(raw=resp.content)
+    payload = reply.ked["a"]
+
+    assert reply.ked["r"] == "/account/watchers/delete"
+    assert payload["watcher_id"] == watcher_id
+    assert payload["deleted"] is True
+    assert client.ctx.store.get_resource("watcher", watcher_id) is None
+
+
+    # # 6a. /account/witnesses
+    # serder, end = exchanging.exchange(
+    #     route="/account/witnesses",
+    #     payload={},
+    #     sender=perm.pre,
+    # )
+    # msg = build_exn_with_tsgs(perm, serder, end)
+    # resp = post_cesr(client, msg)
+    # assert resp.status_code == 200
+
+    # reply = SerderKERI(raw=resp.content)
+    # payload = reply.ked["a"]
+
+    # assert reply.ked["r"] == "/account/witnesses"
+    # assert isinstance(payload["witnesses"], list)
+    # assert witness_id in payload["witnesses"]
+
+    # # 6b. /account/watchers
+    # serder, end = exchanging.exchange(
+    #     route="/account/watchers",
+    #     payload={},
+    #     sender=perm.pre,
+    # )
+    # msg = build_exn_with_tsgs(perm, serder, end)
+    # resp = post_cesr(client, msg)
+    # assert resp.status_code == 200
+
+    # reply = SerderKERI(raw=resp.content)
+    # payload = reply.ked["a"]
+
+    # assert reply.ked["r"] == "/account/watchers"
+    # assert isinstance(payload["watchers"], list)
+    # assert watcher_id in payload["watchers"]
+
+    # # 6c. /account/watchers/status
+    # serder, end = exchanging.exchange(
+    #     route="/account/watchers/status",
+    #     payload={"watcher_id": watcher_id},
+    #     sender=perm.pre,
+    # )
+    # msg = build_exn_with_tsgs(perm, serder, end)
+    # resp = post_cesr(client, msg)
+    # assert resp.status_code == 200
+
+    # reply = SerderKERI(raw=resp.content)
+    # payload = reply.ked["a"]
+
+    # assert reply.ked["r"] == "/account/watchers/status"
+    # assert payload["watcher_id"] == watcher_id
+    # assert "status" in payload
