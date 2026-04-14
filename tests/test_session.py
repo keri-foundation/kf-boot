@@ -251,6 +251,8 @@ def test_full_onboarding_flow(client):
     EXN‑producing endpoints return a non‑empty CESR payload, confirming that
     the BootExchanger dispatched the EXN to the correct handler and produced
     a reply cue.
+
+    Note that you need to run local witness and watchers servers
     """
     eph_hby = Habery(name="eph", temp=True)
     eph = eph_hby.makeHab(name="eph", transferable=False)
