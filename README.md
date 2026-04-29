@@ -213,6 +213,37 @@ Required environment:
 - `KF_BOOT_WAT_BOOT_URL`
 - `KF_BOOT_WAT_PUBLIC_URL`
 
+## Docker Compose Distributed Dev Topology
+
+`kf-boot` includes a compose topology that models a distributed deployment:
+
+- four witness containers (`wit-1` to `wit-4`)
+- one watcher container
+- one `kf-boot` container
+
+Use the compose file from the repository root:
+
+```bash
+docker compose -f docker-compose.distributed-dev.yml up --build
+```
+
+Exposed host ports:
+
+- `5632`, `5642`, `5652`, `5662` (witness public HTTP)
+- `7632` (watcher public HTTP)
+- `9723` (`kf-boot` API)
+
+The compose stack defaults public URLs to `localhost`. To advertise a different
+host (for remote wallet clients), set:
+
+```bash
+export KF_BOOT_PUBLIC_HOST=192.0.2.10
+docker compose -f docker-compose.distributed-dev.yml up --build
+```
+
+See `setup-guide.md` section "Docker Compose distributed development deployment"
+for more details.
+
 Optional environment:
 
 - `KF_BOOT_WIT_BOOT_URL` legacy single-backend fallback

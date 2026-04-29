@@ -1,0 +1,168 @@
+services:
+  witness-1:
+    build:
+      context: ..
+      dockerfile: distributed-dev/witness/Dockerfile
+    container_name: kfboot-witness-1
+    environment:
+      WIT_ALIAS: wit-1
+      WIT_BASE: pool-1
+      WIT_BOOT_PORT: 5631
+      WIT_HTTP_PORT: 5632
+      WIT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:5632
+    ports:
+      - "5632:5632"
+    volumes:
+      - witness1-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5631/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  witness-2:
+    build:
+      context: ..
+      dockerfile: distributed-dev/witness/Dockerfile
+    container_name: kfboot-witness-2
+    environment:
+      WIT_ALIAS: wit-2
+      WIT_BASE: pool-2
+      WIT_BOOT_PORT: 5641
+      WIT_HTTP_PORT: 5642
+      WIT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:5642
+    ports:
+      - "5642:5642"
+    volumes:
+      - witness2-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5641/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  witness-3:
+    build:
+      context: ..
+      dockerfile: distributed-dev/witness/Dockerfile
+    container_name: kfboot-witness-3
+    environment:
+      WIT_ALIAS: wit-3
+      WIT_BASE: pool-3
+      WIT_BOOT_PORT: 5651
+      WIT_HTTP_PORT: 5652
+      WIT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:5652
+    ports:
+      - "5652:5652"
+    volumes:
+      - witness3-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5651/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  witness-4:
+    build:
+      context: ..
+      dockerfile: distributed-dev/witness/Dockerfile
+    container_name: kfboot-witness-4
+    environment:
+      WIT_ALIAS: wit-4
+      WIT_BASE: pool-4
+      WIT_BOOT_PORT: 5661
+      WIT_HTTP_PORT: 5662
+      WIT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:5662
+    ports:
+      - "5662:5662"
+    volumes:
+      - witness4-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5661/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  watcher:
+    build:
+      context: ..
+      dockerfile: distributed-dev/watcher/Dockerfile
+    container_name: kfboot-watcher
+    depends_on:
+      witness-1:
+        condition: service_healthy
+      witness-2:
+        condition: service_healthy
+      witness-3:
+        condition: service_healthy
+      witness-4:
+        condition: service_healthy
+    environment:
+      WAT_BOOT_PORT: 7631
+      WAT_HTTP_PORT: 7632
+      WAT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:7632
+    ports:
+      - "7632:7632"
+    volumes:
+      - watcher-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1', 7631), 2); s.close()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  kf-boot:
+    build:
+      context: ..
+      dockerfile: distributed-dev/kf-boot/Dockerfile
+    container_name: kfboot-service
+    depends_on:
+      witness-1:
+        condition: service_healthy
+      witness-2:
+        condition: service_healthy
+      witness-3:
+        condition: service_healthy
+      witness-4:
+        condition: service_healthy
+      watcher:
+        condition: service_healthy
+    environment:
+      KF_BOOT_HOST: 0.0.0.0
+      KF_BOOT_PORT: 9723
+      KF_BOOT_DB_PATH: /data/var
+      KF_BOOT_KERI_DIR: /data/keri
+      KF_BOOT_WITNESS_BACKENDS: wit-1|http://witness-1:5631|http://${KF_BOOT_PUBLIC_HOST:-localhost}:5632,wit-2|http://witness-2:5641|http://${KF_BOOT_PUBLIC_HOST:-localhost}:5642,wit-3|http://witness-3:5651|http://${KF_BOOT_PUBLIC_HOST:-localhost}:5652,wit-4|http://witness-4:5661|http://${KF_BOOT_PUBLIC_HOST:-localhost}:5662
+      KF_BOOT_WAT_BOOT_URL: http://watcher:7631
+      KF_BOOT_WAT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:7632
+      KF_BOOT_ONBOARDING_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:9723/onboarding
+      KF_BOOT_ACCOUNT_PUBLIC_URL: http://${KF_BOOT_PUBLIC_HOST:-localhost}:9723/account
+    ports:
+      - "9723:9723"
+    volumes:
+      - kfboot-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9723/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  witness1-data:
+  witness2-data:
+  witness3-data:
+  witness4-data:
+  watcher-data:
+  kfboot-data:
