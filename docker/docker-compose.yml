@@ -2,7 +2,7 @@ services:
   witness-1:
     build:
       context: ..
-      dockerfile: distributed-dev/witness/Dockerfile
+      dockerfile: docker/distributed-dev/witness/Dockerfile
     container_name: kfboot-witness-1
     environment:
       WIT_ALIAS: wit-1
@@ -24,7 +24,7 @@ services:
   witness-2:
     build:
       context: ..
-      dockerfile: distributed-dev/witness/Dockerfile
+      dockerfile: docker/distributed-dev/witness/Dockerfile
     container_name: kfboot-witness-2
     environment:
       WIT_ALIAS: wit-2
@@ -46,7 +46,7 @@ services:
   witness-3:
     build:
       context: ..
-      dockerfile: distributed-dev/witness/Dockerfile
+      dockerfile: docker/distributed-dev/witness/Dockerfile
     container_name: kfboot-witness-3
     environment:
       WIT_ALIAS: wit-3
@@ -68,7 +68,7 @@ services:
   witness-4:
     build:
       context: ..
-      dockerfile: distributed-dev/witness/Dockerfile
+      dockerfile: docker/distributed-dev/witness/Dockerfile
     container_name: kfboot-witness-4
     environment:
       WIT_ALIAS: wit-4
@@ -90,7 +90,7 @@ services:
   watcher:
     build:
       context: ..
-      dockerfile: distributed-dev/watcher/Dockerfile
+      dockerfile: docker/distributed-dev/watcher/Dockerfile
     container_name: kfboot-watcher
     depends_on:
       witness-1:
@@ -125,7 +125,7 @@ services:
   kf-boot:
     build:
       context: ..
-      dockerfile: distributed-dev/kf-boot/Dockerfile
+      dockerfile: docker/distributed-dev/kf-boot/Dockerfile
     container_name: kfboot-service
     depends_on:
       witness-1:

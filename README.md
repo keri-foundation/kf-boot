@@ -221,10 +221,16 @@ Required environment:
 - one watcher container
 - one `kf-boot` container
 
-Use the compose file from the repository root:
+Use the compose file under `docker/` (run from the repository root):
 
 ```bash
-docker compose -f docker-compose.distributed-dev.yml up --build
+docker compose -f docker/docker-compose.yml up --build
+```
+
+Or from the `docker/` directory:
+
+```bash
+cd docker && docker compose up --build
 ```
 
 Exposed host ports:
@@ -238,11 +244,10 @@ host (for remote wallet clients), set:
 
 ```bash
 export KF_BOOT_PUBLIC_HOST=192.0.2.10
-docker compose -f docker-compose.distributed-dev.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 ```
 
-See `setup-guide.md` section "Docker Compose distributed development deployment"
-for more details.
+See `setup-guide.md` for the single-host layout; the compose stack is the same topology in containers.
 
 Optional environment:
 
