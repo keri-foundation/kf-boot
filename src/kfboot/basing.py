@@ -135,7 +135,10 @@ class CleanupTaskRecord:
     updated_at: str = ""
     claimed_at: str = ""
     last_attempt_at: str = ""
+    first_failed_at: str = ""
     last_error: str = ""
+    blocked_at: str = ""
+    blocked_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -143,6 +146,31 @@ class CleanupDueRecord:
     kind: str = ""
     subject: str = ""
     due_at: str = ""
+
+
+@dataclass
+class CleanupAdminActionRecord:
+    action_id: str = ""
+    logged_at: str = ""
+    action: str = ""
+    actor: str = ""
+    kind: str = ""
+    subject: str = ""
+    forced: bool = False
+    operator_reason: str = ""
+    task_blocked_at: str = ""
+    task_blocked_reason: str = ""
+    task_last_error: str = ""
+    task_attempt_count: int = 0
+    task_first_failed_at: str = ""
+    safe_to_dismiss: bool = False
+    cleanup_assured: bool = False
+    local_resource_count: int = 0
+    local_related_record_count: int = 0
+    subject_exists: bool = False
+    subject_state: str = ""
+    resources_cleaned_at: str = ""
+    assessment_reason: str = ""
 
 
 class PlatformBaser(dbing.LMDBer):
@@ -160,6 +188,7 @@ class PlatformBaser(dbing.LMDBer):
         self.quotas = None
         self.cleanup_tasks = None
         self.cleanup_due = None
+        self.cleanup_admin_actions = None
         super().__init__(
             name=name,
             headDirPath=headDirPath,
@@ -205,6 +234,11 @@ class PlatformBaser(dbing.LMDBer):
             db=self,
             subkey="cdue.",
             klas=CleanupDueRecord,
+        )
+        self.cleanup_admin_actions = koming.Komer(
+            db=self,
+            subkey="cada.",
+            klas=CleanupAdminActionRecord,
         )
         return self.env
 

@@ -7,6 +7,8 @@ from falcon import testing
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core.serdering import SerderKERI
 from keri.peer import exchanging
+from kfboot.store import Store, makeRecord
+from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
 
 from kfboot.boot_client import BootError
 from kfboot.config import Config, WitnessBackend
@@ -239,6 +241,8 @@ def make_config(tmp_path, *, index: int = 0, **overrides: Any) -> Config:
         "cleanup_failure_backoff_seconds": 60,
         "cleanup_failure_backoff_max_seconds": 900,
         "cleanup_failure_jitter_seconds": 0,
+        "cleanup_block_after_attempts": 10,
+        "cleanup_block_after_failure_age_seconds": 86400,
         "expired_account_retention_seconds": 0,
         "witness_backends": witness_backends,
     }
@@ -431,3 +435,97 @@ def complete_session(
 
 def boot_error(status_code: int, description: str | None = None) -> BootError:
     return BootError(description or f"boot error {status_code}", status_code=status_code)
+
+
+def makeBlockedTask(tmp_path):
+    """Helper to create a blocked cleanup task"""
+    store = Store(str(tmp_path / "cli-store" / "kf-boot"), session_ttl_seconds=60)
+    session = store.createSession(
+        ephemeral_aid="E-cli",
+        account_aid="A-cli",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.expires_at = "2024-01-01T00:00:00+00:00"
+    store.saveSession(session)
+    store.claimDueCleanupTask(now="2024-01-01T00:00:05+00:00")
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:06+00:00",
+        blocked_reason="simulated operator task",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:05+00:00",
+    )
+    store.close()
+    return str(tmp_path / "cli-store" / "kf-boot"), session.session_id
+
+
+def makeBlockedOrphanTask(tmp_path):
+    """Helper to create a blocked cleanup task with no associated session"""
+    db_path = str(tmp_path / "cli-orphan" / "kf-boot")
+    store = Store(db_path, session_ttl_seconds=60)
+    store.scheduleCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        due_at="2024-01-01T00:00:00+00:00",
+        now="2024-01-01T00:00:00+00:00",
+    )
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        now="2024-01-01T00:00:01+00:00",
+        blocked_reason="orphaned task",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:00+00:00",
+    )
+    store.close()
+    return db_path
+
+
+def makeBlockedOrphanTaskWithResource(tmp_path):
+    """Helper to create a blocked orphaned session task with leftover resources."""
+
+    db_path = str(tmp_path / "cli-orphan-resource" / "kf-boot")
+    store = Store(db_path, session_ttl_seconds=60)
+    store.scheduleCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        due_at="2024-01-01T00:00:00+00:00",
+        now="2024-01-01T00:00:00+00:00",
+    )
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        now="2024-01-01T00:00:01+00:00",
+        blocked_reason="orphaned task with resources",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:00+00:00",
+    )
+    store.addResource(
+        makeRecord(
+            kind="watcher",
+            eid="WAT_ORPHAN",
+            backend_id="wat-1",
+            cid="",
+            principal="",
+            session_id="missing-session",
+            name="orphan watcher",
+            identifier_alias="alpha",
+            region_id="test-region",
+            region_name="Test Region",
+            public_url="https://watcher.example",
+            boot_url="http://boot.local/watchers",
+            oobis=[],
+            status="created",
+        )
+    )
+    store.close()
+    return db_path

@@ -20,7 +20,12 @@ from kfboot.basing import (
     SessionRecord,
 )
 from kfboot.store import (
+    CleanupTaskNotBlockedError,
+    CleanupTaskNotFoundError,
+    ForcedDismissReasonRequiredError,
+    RequeueReasonRequiredError,
     Store,
+    UnsafeBlockedTaskDismissError,
     accountFailed,
     makeRecord,
     parsePublicUrl,
@@ -496,6 +501,58 @@ def test_cleanup_backlog_snapshot_reports_claimed_work(store):
     assert snapshot["oldest_claimed_age_seconds"] == 5.0
 
 
+def test_cleanup_backlog_snapshot_reports_blocked_work(store):
+    """Test backlog snapshot reports blocked work """
+    # Create a session and expire it
+    session = store.createSession(
+        ephemeral_aid="E-blocked",
+        account_aid="A-blocked",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.expires_at = "2024-01-01T00:00:00+00:00"
+    store.saveSession(session)
+
+    # Claim due expiry task
+    claimed = store.claimDueCleanupTask(
+        now="2024-01-01T00:00:05+00:00",
+    )
+
+    # Block session expire task
+    blocked = store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:06+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:05+00:00",
+    )
+
+    # Get the backlog
+    snapshot = store.cleanupBacklogSnapshot(now="2024-01-01T00:00:10+00:00")
+
+    # Assert the backlog reports correctly
+    assert claimed is not None
+    assert blocked is not None
+
+    # Assert that the session expiry task is showing
+    assert snapshot["pending_tasks"] == 1
+    assert snapshot["due_tasks"] == 0
+    assert snapshot["claimed_tasks"] == 0
+
+    # Assert that the blocked task is reported
+    assert snapshot["blocked_tasks"] == 1
+    assert snapshot["oldest_blocked_at"] == "2024-01-01T00:00:06+00:00"
+    assert snapshot["oldest_blocked_age_seconds"] == 4.0
+
+
 def test_requeue_claimed_cleanup_tasks_makes_work_immediately_visible_again(store):
     session = store.createSession(
         ephemeral_aid="E-recover",
@@ -527,6 +584,358 @@ def test_requeue_claimed_cleanup_tasks_makes_work_immediately_visible_again(stor
     assert task.claimed_at == ""
     assert task.due_at == "2024-01-01T00:00:10+00:00"
     assert [row.subject for row in due] == [session.session_id]
+
+
+def test_requeue_blocked_cleanup_task_restores_due_work(store):
+    """Test that requeuing a blocked task makes it due again immediately and clears blocked state"""
+    
+    # Create a session and expire it
+    session = store.createSession(
+        ephemeral_aid="E-blocked-requeue",
+        account_aid="A-blocked-requeue",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.expires_at = "2024-01-01T00:00:00+00:00"
+    store.saveSession(session)
+
+    # Claim the expire task and block it
+    _claimed = store.claimDueCleanupTask(now="2024-01-01T00:00:05+00:00")
+    task = store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:06+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:05+00:00",
+    )
+
+    # Requeue the blocked task 
+    requeued = store.requeueBlockedCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:10+00:00",
+        actor="operator-a",
+        operator_reason="backend recovered",
+    )
+
+    # Assert that the task is due again immediately
+    due = store.listDueCleanupTasks(now="2024-01-01T00:00:10+00:00")
+
+    # Task was blocked sucessfully
+    assert task is not None
+
+    # Task was requeued sucessfully, block metadata was cleared
+    assert requeued is not None
+    assert requeued.blocked_at == ""
+    assert requeued.blocked_reason == ""
+    assert requeued.first_failed_at == ""
+    assert requeued.attempt_count == 0
+    
+    # Task is due immediately
+    assert requeued.due_at == "2024-01-01T00:00:10+00:00"
+    assert [row.subject for row in due] == [session.session_id]
+
+    actions = store.listCleanupAdminActions(limit=1)
+    assert actions[0].action == "requeue"
+    assert actions[0].actor == "operator-a"
+    assert actions[0].operator_reason == "backend recovered"
+    assert actions[0].task_attempt_count == 1
+    assert actions[0].task_first_failed_at == "2024-01-01T00:00:05+00:00"
+
+
+def test_requeue_blocked_cleanup_task_requires_reason_and_blocked_task(store, monkeypatch):
+    """Test that direct store requeue uses explicit domain errors."""
+
+    monkeypatch.setenv("USER", "operator-default")
+    session = store.createSession(
+        ephemeral_aid="E-requeue",
+        account_aid="A-requeue",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.expires_at = "2024-01-01T00:00:00+00:00"
+    store.saveSession(session)
+
+    with pytest.raises(CleanupTaskNotBlockedError):
+        store.requeueBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_EXPIRE,
+            session.session_id,
+            now="2024-01-01T00:00:01+00:00",
+            operator_reason="retry",
+        )
+
+    with pytest.raises(CleanupTaskNotFoundError):
+        store.requeueBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_EXPIRE,
+            "missing-session",
+            now="2024-01-01T00:00:01+00:00",
+            operator_reason="retry",
+        )
+
+    store.claimDueCleanupTask(now="2024-01-01T00:00:05+00:00")
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:06+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:05+00:00",
+    )
+
+    with pytest.raises(RequeueReasonRequiredError):
+        store.requeueBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_EXPIRE,
+            session.session_id,
+            now="2024-01-01T00:00:10+00:00",
+        )
+
+
+def test_dismiss_assessment_refuses_missing_session_with_orphaned_resources(store):
+    """Test that the assessment for dismissing a task with orphaned resources is deemed unsafe"""
+
+    # Create a cleanup task for a missing sesion
+    store.scheduleCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        due_at="2024-01-01T00:00:00+00:00",
+        now="2024-01-01T00:00:00+00:00",
+    )
+
+    # Block that task to simulate a failed cleanup
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+        now="2024-01-01T00:00:01+00:00",
+        blocked_reason="orphaned task",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:00+00:00",
+    )
+
+    # Add an orphaned resource record
+    store.addResource(
+        makeRecord(
+            kind="watcher",
+            eid="WAT_ORPHAN",
+            backend_id="wat-1",
+            cid="",
+            principal="",
+            session_id="missing-session",
+            name="orphan watcher",
+            identifier_alias="alpha",
+            region_id="test-region",
+            region_name="Test Region",
+            public_url="https://watcher.example",
+            boot_url="http://boot.local/watchers",
+            oobis=[],
+            status="created",
+        )
+    )
+
+    # Run the assessment
+    assessment = store.blockedCleanupTaskDismissAssessment(
+        CLEANUP_TASK_SESSION_CLEANUP,
+        "missing-session",
+    )
+
+    # Assert that the assessment identifies the missing session and orphaned resources
+    assert assessment.subject_exists is False
+    assert assessment.local_resource_count == 1
+    assert "orphaned resources" in assessment.reason
+
+    # Assert that dismissal is deemed unsafe
+    assert assessment.safe_to_dismiss is False
+
+
+
+def test_dismiss_blocked_cleanup_task_enforces_store_safety_policy(store):
+    """Test that safety checks are enforced even when not using CLI"""
+    # Create a session and expire it
+    session = store.createSession(
+        ephemeral_aid="E-dismiss",
+        account_aid="A-dismiss",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.expires_at = "2024-01-01T00:00:00+00:00"
+    store.saveSession(session)
+
+    # Claim the session expiry task and block it
+    store.claimDueCleanupTask(now="2024-01-01T00:00:05+00:00")
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:06+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:05+00:00",
+    )
+
+    # Assert that dismissal is blocked
+    with pytest.raises(UnsafeBlockedTaskDismissError):
+        store.dismissBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_EXPIRE,
+            session.session_id,
+            now="2024-01-01T00:00:10+00:00",
+            actor="test",
+        )
+
+    # Assert that dismissal is also blocked without a reason provided
+    with pytest.raises(ForcedDismissReasonRequiredError):
+        store.dismissBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_EXPIRE,
+            session.session_id,
+            now="2024-01-01T00:00:10+00:00",
+            actor="test",
+            force=True,
+        )
+
+    # Assert that dismissal is successful with force and a reason provided
+    dismissed = store.dismissBlockedCleanupTask(
+        CLEANUP_TASK_SESSION_EXPIRE,
+        session.session_id,
+        now="2024-01-01T00:00:10+00:00",
+        actor="test",
+        operator_reason="some reason",
+        force=True,
+    )
+
+    # Retrieve the Admin actions
+    actions = store.listCleanupAdminActions(limit=1)
+
+    # Assert that the task was succesfully dismissed
+    assert dismissed is not None
+
+    # Assert that the task is cleared
+    assert store.getCleanupTask(CLEANUP_TASK_SESSION_EXPIRE, session.session_id) is None
+
+    # Assert the admin action record is accurate
+    assert actions[0].action == "dismiss"
+    assert actions[0].forced is True
+    assert actions[0].actor == "test"
+    assert actions[0].operator_reason == "some reason"
+    assert actions[0].task_attempt_count == 1
+    assert actions[0].task_first_failed_at == "2024-01-01T00:00:05+00:00"
+
+
+def test_session_delete_dismiss_requires_force_while_session_row_still_exists(store):
+    """Test that blocked session-delete tasks stay unsafe until the row is gone."""
+    session = store.createSession(
+        ephemeral_aid="E-session-delete",
+        account_aid="A-session-delete",
+        account_alias="alpha",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="test-region",
+        region_name="Test Region",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="trial",
+    )
+    session.state = SESSION_STATE_EXPIRED
+    session.expired_at = "2024-01-01T00:00:00+00:00"
+    session.resources_cleaned_at = "2024-01-01T00:00:01+00:00"
+    store.saveSession(session)
+
+    store.claimDueCleanupTask(now="2024-01-01T00:00:02+00:00")
+    store.blockCleanupTask(
+        CLEANUP_TASK_SESSION_DELETE,
+        session.session_id,
+        now="2024-01-01T00:00:03+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:02+00:00",
+    )
+
+    assessment = store.blockedCleanupTaskDismissAssessment(
+        CLEANUP_TASK_SESSION_DELETE,
+        session.session_id,
+    )
+
+    assert assessment.subject_exists is True
+    assert assessment.cleanup_assured is True
+    assert assessment.safe_to_dismiss is False
+    assert "delete phase" in assessment.reason
+
+    with pytest.raises(UnsafeBlockedTaskDismissError):
+        store.dismissBlockedCleanupTask(
+            CLEANUP_TASK_SESSION_DELETE,
+            session.session_id,
+            now="2024-01-01T00:00:10+00:00",
+            actor="test",
+        )
+
+
+def test_account_delete_dismiss_requires_force_while_account_row_still_exists(store):
+    """Test that blocked account-delete tasks stay unsafe until the row is gone."""
+    account = store.buildAccount(
+        account_aid="A-account-delete",
+        account_alias="alpha",
+        witness_profile_code="1-of-1",
+        witness_count=1,
+        toad=1,
+        watcher_required=True,
+        region_id="test-region",
+        region_name="Test Region",
+        session_id="",
+        witness_eids=[],
+        watcher_eid="",
+        onboarded=True,
+    )
+    account.status = ACCOUNT_STATE_EXPIRED
+    account.expired_at = "2024-01-01T00:00:00+00:00"
+    account.resources_cleaned_at = "2024-01-01T00:00:01+00:00"
+    store.saveAccount(account)
+
+    store.claimDueCleanupTask(now="2024-01-01T00:00:02+00:00")
+    store.blockCleanupTask(
+        CLEANUP_TASK_ACCOUNT_DELETE,
+        account.account_aid,
+        now="2024-01-01T00:00:03+00:00",
+        blocked_reason="simulated operator intervention",
+        last_error="simulated failure",
+        first_failed_at="2024-01-01T00:00:02+00:00",
+    )
+
+    assessment = store.blockedCleanupTaskDismissAssessment(
+        CLEANUP_TASK_ACCOUNT_DELETE,
+        account.account_aid,
+    )
+
+    assert assessment.subject_exists is True
+    assert assessment.cleanup_assured is True
+    assert assessment.safe_to_dismiss is False
+    assert "delete phase" in assessment.reason
+
+    with pytest.raises(UnsafeBlockedTaskDismissError):
+        store.dismissBlockedCleanupTask(
+            CLEANUP_TASK_ACCOUNT_DELETE,
+            account.account_aid,
+            now="2024-01-01T00:00:10+00:00",
+            actor="test",
+        )
 
 
 def test_save_session_with_invalid_expiry_fails_closed(store):

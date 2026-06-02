@@ -627,6 +627,62 @@ def test_cleanup_expired_sessions_failure_does_not_report_false_success(contract
         assert task.due_at == "2026-01-01T00:01:00+00:00"
 
 
+def test_cleanup_expired_sessions_blocks_non_retryable_failures(contract_factory, monkeypatch):
+    """Permanent cleanup failures should be quarantined instead of retried forever."""
+    contract = contract_factory(
+        bootstrap_accounts_per_ip=100,
+        bootstrap_aids_per_ip=100,
+    )
+
+    with habbing.openHab(name="cleanup-blocked-session", temp=True, transferable=False) as (_, ephemeral):
+        register_aid(contract, "/onboarding", ephemeral)
+        _, _, start_reply = start_session(contract, ephemeral)
+
+        session_id = start_reply.ked["a"]["session_id"]
+        session = contract.ctx.store.getSession(session_id)
+        session.expires_at = "2000-01-01T00:00:00+00:00"
+        contract.ctx.store.saveSession(session)
+        sweep_do(
+            contract.ctx.exchanger.expirer,
+            now="2026-01-01T00:00:00+00:00",
+            batch_size=1,
+        )
+
+        # Simulate a malformed request with error code 400
+        def non_retryable_do(*, session: Any, account=None, tymth, tock: float = 0.0):
+            yield tock
+            raise BootError("simulated malformed cleanup request", status_code=400)
+
+        monkeypatch.setattr(
+            contract.ctx.exchanger.provisioner,
+            "teardownSessionResourcesDo",
+            non_retryable_do,
+        )
+
+        # Run the cleanup
+        cleaned = sweep_do(
+            contract.ctx.exchanger.expirer,
+            now="2026-01-01T00:00:00+00:00",
+            batch_size=1,
+        )
+
+        # Get the cleanup task and backlog
+        task = contract.ctx.store.getCleanupTask("session_cleanup", session_id)
+        snapshot = contract.ctx.store.cleanupBacklogSnapshot(now="2026-01-01T00:00:10+00:00")
+
+        # Assert cleanning failed and task is blocked without retry attempts
+        assert cleaned["sessions_cleaned"] == 0
+        assert task is not None
+
+        # Assert blocked task is cleared from due metadata and has blocked metadata
+        assert task.due_at == ""
+        assert task.claimed_at == ""
+        assert task.blocked_at == "2026-01-01T00:00:00+00:00"
+        assert "Non-retryable cleanup failure" in task.blocked_reason
+        assert task.last_error == "simulated malformed cleanup request"
+        assert snapshot["blocked_tasks"] == 1
+
+
 def test_expired_sessions_reclaim_hosted_resources_and_fail_pending_account(contract):
     with (
         habbing.openHab(name="expiry-owner-ephemeral", temp=True, transferable=False) as (_, ephemeral),

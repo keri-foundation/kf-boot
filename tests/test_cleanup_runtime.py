@@ -102,6 +102,8 @@ def cleanup_ctx(store):
             cleanup_failure_backoff_seconds=60,
             cleanup_failure_backoff_max_seconds=900,
             cleanup_failure_jitter_seconds=0,
+            cleanup_block_after_attempts=10,
+            cleanup_block_after_failure_age_seconds=86400.0,
         ),
     )
 

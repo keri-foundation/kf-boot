@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -16,6 +18,7 @@ from kfboot.basing import (
     ACCOUNT_STATE_EXPIRED,
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
+    CleanupAdminActionRecord,
     CleanupDueRecord,
     CleanupTaskRecord,
     SESSION_STATE_CANCELLED,
@@ -77,6 +80,60 @@ def _resourceToApi(record: ResourceRecord, *, include_boot_url: bool = False) ->
     return data
 
 
+def _defaultAdminActor(actor: str = "") -> str:
+    """Resolve a human-readable local actor name for CLI-driven admin actions."""
+
+    candidate = actor.strip()
+    if candidate:
+        return candidate
+    env_user = os.environ.get("USER", "").strip()
+    if env_user:
+        return env_user
+    if hasattr(os, "geteuid"):
+        return f"uid:{os.geteuid()}"
+    return "local-operator"
+
+
+@dataclass(frozen=True)
+class BlockedTaskDismissAssessment:
+    kind: str
+    subject: str
+    task_exists: bool
+    task_blocked: bool
+    safe_to_dismiss: bool
+    cleanup_assured: bool
+    local_resource_count: int
+    local_related_record_count: int
+    subject_exists: bool
+    subject_state: str
+    resources_cleaned_at: str
+    reason: str
+
+
+class UnsafeBlockedTaskDismissError(RuntimeError):
+    """Raised when operator dismissal would abandon cleanup debt."""
+
+    def __init__(self, assessment: BlockedTaskDismissAssessment):
+        self.assessment = assessment
+        super().__init__(assessment.reason)
+
+
+class ForcedDismissReasonRequiredError(RuntimeError):
+    """Raised when a forced dismissal is attempted without an operator reason."""
+
+
+class RequeueReasonRequiredError(RuntimeError):
+    """Raised when a blocked task requeue is attempted without an operator reason."""
+
+
+class CleanupTaskNotFoundError(RuntimeError):
+    """Raised when an operator action references a cleanup task that does not exist."""
+
+
+class CleanupTaskNotBlockedError(RuntimeError):
+    """Raised when an operator action references a task that is not blocked."""
+
+
 class Store:
     """
     Persistent state manager for sessions, accounts, resources, and cleanup tasks.
@@ -86,6 +143,7 @@ class Store:
     - Keep cleanup_tasks and cleanup_due tables synchronized.
     - Provide atomic, idempotent state transitions for sessions and accounts.
     - Track cleanup work in progress so a single runner can recover after restarts.
+    - Keep blocked cleanup tasks until an operator explicitly requeues them.
 
     Attributes:
     - baser:
@@ -257,6 +315,11 @@ class Store:
                 updated_at=current,
             )
         else:
+            # Blocked tasks require explicit operator intervention before they are
+            # allowed back onto the runnable queue. Normal lifecycle resync should
+            # preserve that quarantine instead of silently reactivating the task.
+            if record.blocked_at:
+                return record
             # If it exists, update the record and move its due time forward with the provided due_at
             previous_due_at = record.due_at
             record.due_at = due_at
@@ -297,11 +360,22 @@ class Store:
         pending_tasks = 0
         due_tasks = 0
         claimed_tasks = 0
+        blocked_tasks = 0
         oldest_due_dt: datetime | None = None
         oldest_claimed_dt: datetime | None = None
+        oldest_blocked_dt: datetime | None = None
 
         for _, task in self.baser.cleanup_tasks.getTopItemIter(keys=()):
             pending_tasks += 1
+            if task.blocked_at:
+                blocked_tasks += 1
+                try:
+                    blocked_dt = _parseDt(task.blocked_at or task.updated_at or task.created_at)
+                except ValueError:
+                    blocked_dt = None
+                if blocked_dt is not None and (oldest_blocked_dt is None or blocked_dt < oldest_blocked_dt):
+                    oldest_blocked_dt = blocked_dt
+                continue
             # Claimed tasks are in progress for the single runner, so they should
             # be reported separately from due work even if they were originally due.
             if task.claimed_at:
@@ -337,14 +411,23 @@ class Store:
             if oldest_claimed_dt is not None
             else None
         )
+        oldest_blocked_at = oldest_blocked_dt.isoformat() if oldest_blocked_dt is not None else None
+        oldest_blocked_age_seconds = (
+            max((current_dt - oldest_blocked_dt).total_seconds(), 0.0)
+            if oldest_blocked_dt is not None
+            else None
+        )
         return {
             "pending_tasks": pending_tasks,
             "due_tasks": due_tasks,
             "claimed_tasks": claimed_tasks,
+            "blocked_tasks": blocked_tasks,
             "oldest_due_at": oldest_due_at,
             "oldest_due_age_seconds": oldest_due_age_seconds,
             "oldest_claimed_at": oldest_claimed_at,
             "oldest_claimed_age_seconds": oldest_claimed_age_seconds,
+            "oldest_blocked_at": oldest_blocked_at,
+            "oldest_blocked_age_seconds": oldest_blocked_age_seconds,
         }
 
     def requeueClaimedCleanupTasks(self, *, now: str | None = None) -> int:
@@ -361,6 +444,8 @@ class Store:
 
         for task in tasks:
             if not task.claimed_at:
+                continue
+            if task.blocked_at:
                 continue
 
             previous_due_at = task.due_at
@@ -402,7 +487,7 @@ class Store:
 
             # Task is due, retrieve it
             task = self.getCleanupTask(task_kind, subject)
-            if task is None or _dueIndexKey(task.due_at) != due_key:
+            if task is None or not task.due_at or task.blocked_at or _dueIndexKey(task.due_at) != due_key:
                 # Task cannot be found, append to stale
                 stale.append(keys)
                 continue
@@ -451,7 +536,7 @@ class Store:
 
             # Retrieve task
             task = self.getCleanupTask(task_kind, subject)
-            if task is None or _dueIndexKey(task.due_at) != due_key:
+            if task is None or not task.due_at or task.blocked_at or _dueIndexKey(task.due_at) != due_key:
                 # Task is stale, append it to the stale list
                 stale.append(keys)
                 continue
@@ -485,6 +570,786 @@ class Store:
             self.baser.cleanup_due.rem(keys=keys)
 
         return None
+
+    def blockCleanupTask(
+        self,
+        kind: str,
+        subject: str,
+        *,
+        now: str,
+        blocked_reason: str,
+        last_error: str | None = None,
+        first_failed_at: str | None = None,
+    ) -> CleanupTaskRecord | None:
+        """Quarantine a poisoned cleanup task until an operator requeues it.
+
+        Blocked tasks stay durable and visible, but they are intentionally kept
+        off the runnable queue so the cleanup runner stops retrying work
+        that no longer looks self-healing.
+        """
+        
+        # Get the record
+        record = self.getCleanupTask(kind, subject)
+        if record is None:
+            return None
+        
+        # Clean up record and set block metadata
+        previous_due_at = record.due_at
+        record.due_at = ""
+        record.updated_at = now
+        record.claimed_at = ""
+        if first_failed_at and not record.first_failed_at:
+            record.first_failed_at = first_failed_at
+        if last_error is not None:
+            record.last_error = last_error
+        record.blocked_at = now
+        record.blocked_reason = blocked_reason
+
+        # Save record and return it
+        self._saveCleanupTask(record, previous_due_at=previous_due_at)
+        return record
+
+    def rescheduleFailedCleanupTask(
+        self,
+        kind: str,
+        subject: str,
+        *,
+        due_at: str,
+        now: str,
+        last_error: str,
+        first_failed_at: str | None = None,
+    ) -> CleanupTaskRecord | None:
+        """Reschedule a failed task while preserving failure metadata."""
+
+        # Get record
+        record = self.getCleanupTask(kind, subject)
+        if record is None:
+            return None
+        if record.blocked_at:
+            return record
+
+        # Set failure metadata and reschedule the task
+        previous_due_at = record.due_at
+        record.due_at = due_at
+        record.updated_at = now
+        record.claimed_at = ""
+        if first_failed_at and not record.first_failed_at:
+            record.first_failed_at = first_failed_at
+        record.last_error = last_error
+        self._saveCleanupTask(record, previous_due_at=previous_due_at)
+        return record
+
+    def listBlockedCleanupTasks(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[CleanupTaskRecord]:
+        """Return blocked cleanup tasks ordered by when they were blocked."""
+
+        rows: list[CleanupTaskRecord] = []
+        for _, task in self.baser.cleanup_tasks.getTopItemIter(keys=()):
+            if not task.blocked_at:
+                continue
+            if kind is not None and task.kind != kind:
+                continue
+            rows.append(task)
+
+        rows.sort(key=lambda task: (_sortValue(task.blocked_at), task.kind, task.subject))
+        if limit is not None:
+            return rows[:limit]
+        return rows
+
+    def requeueBlockedCleanupTask(
+        self,
+        kind: str,
+        subject: str,
+        *,
+        now: str,
+        actor: str = "cli",
+        operator_reason: str = "",
+    ) -> CleanupTaskRecord:
+        """Make a blocked task runnable again after operator review."""
+
+        record = self._blockedTaskForOperatorAction(kind, subject)
+        trimmed_reason = operator_reason.strip()
+        if not trimmed_reason:
+            raise RequeueReasonRequiredError(
+                "Requeueing a blocked task requires an operator reason."
+            )
+
+        previous_due_at = record.due_at
+        blocked_snapshot = record.blocked_at
+        blocked_reason = record.blocked_reason
+        last_error = record.last_error
+        attempt_count = record.attempt_count
+        first_failed_at = record.first_failed_at
+        record.due_at = now
+        record.updated_at = now
+        record.claimed_at = ""
+        record.attempt_count = 0
+        record.first_failed_at = ""
+        record.blocked_at = ""
+        record.blocked_reason = ""
+        admin_action = self._buildCleanupAdminActionRecord(
+            action="requeue",
+            task=record,
+            now=now,
+            actor=_defaultAdminActor(actor),
+            operator_reason=trimmed_reason,
+            forced=False,
+            assessment=None,
+            task_blocked_at=blocked_snapshot,
+            task_blocked_reason=blocked_reason,
+            task_last_error=last_error,
+            task_attempt_count=attempt_count,
+            task_first_failed_at=first_failed_at,
+        )
+        self._persistTaskOperatorAction(
+            task=record,
+            previous_due_at=previous_due_at,
+            admin_action=admin_action,
+            remove_task=False,
+        )
+        return record
+
+    def blockedCleanupTaskDismissAssessment(
+        self,
+        kind: str,
+        subject: str,
+    ) -> BlockedTaskDismissAssessment:
+        """Describe whether dismissing a blocked task would abandon cleanup debt.
+
+        Dismissing a blocked task does not perform any resource cleanup. This
+        helper gives operator tooling a conservative local-state check so the
+        CLI can refuse obviously unsafe dismissals unless the operator chooses
+        to override that guard with `--force`.
+        """
+
+        task = self.getCleanupTask(kind, subject)
+        if task is None:
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=False,
+                task_blocked=False,
+                safe_to_dismiss=False,
+                cleanup_assured=False,
+                local_resource_count=0,
+                local_related_record_count=0,
+                subject_exists=False,
+                subject_state="",
+                resources_cleaned_at="",
+                reason="Task not found.",
+            )
+
+        if kind in {
+            CLEANUP_TASK_SESSION_EXPIRE,
+            CLEANUP_TASK_SESSION_CLEANUP,
+            CLEANUP_TASK_SESSION_DELETE,
+        }:
+            return self._sessionBlockedTaskDismissAssessment(kind, subject, task)
+
+        if kind in {
+            CLEANUP_TASK_ACCOUNT_EXPIRE,
+            CLEANUP_TASK_ACCOUNT_CLEANUP,
+            CLEANUP_TASK_ACCOUNT_DELETE,
+        }:
+            return self._accountBlockedTaskDismissAssessment(kind, subject, task)
+
+        return BlockedTaskDismissAssessment(
+            kind=kind,
+            subject=subject,
+            task_exists=True,
+            task_blocked=bool(task.blocked_at),
+            safe_to_dismiss=False,
+            cleanup_assured=False,
+            local_resource_count=0,
+            local_related_record_count=0,
+            subject_exists=False,
+            subject_state="",
+            resources_cleaned_at="",
+            reason=(
+                "Unknown cleanup task kind. Dismissing it would bypass an "
+                "unsupported lifecycle path."
+            ),
+        )
+
+    def dismissBlockedCleanupTask(
+        self,
+        kind: str,
+        subject: str,
+        *,
+        now: str,
+        actor: str = "cli",
+        operator_reason: str = "",
+        force: bool = False,
+    ) -> CleanupTaskRecord:
+        """Remove blocked queue state after the operator has reviewed the task."""
+
+        record = self._blockedTaskForOperatorAction(kind, subject)
+        assessment = self.blockedCleanupTaskDismissAssessment(kind, subject)
+        if not assessment.safe_to_dismiss and not force:
+            raise UnsafeBlockedTaskDismissError(assessment)
+        trimmed_reason = operator_reason.strip()
+        if force and not trimmed_reason:
+            raise ForcedDismissReasonRequiredError(
+                "Forced dismissal requires an operator reason."
+            )
+
+        blocked_snapshot = record.blocked_at
+        blocked_reason = record.blocked_reason
+        last_error = record.last_error
+        attempt_count = record.attempt_count
+        first_failed_at = record.first_failed_at
+        admin_action = self._buildCleanupAdminActionRecord(
+            action="dismiss",
+            task=record,
+            now=now,
+            actor=_defaultAdminActor(actor),
+            operator_reason=trimmed_reason,
+            forced=force,
+            assessment=assessment,
+            task_blocked_at=blocked_snapshot,
+            task_blocked_reason=blocked_reason,
+            task_last_error=last_error,
+            task_attempt_count=attempt_count,
+            task_first_failed_at=first_failed_at,
+        )
+        self._persistTaskOperatorAction(
+            task=record,
+            previous_due_at=record.due_at,
+            admin_action=admin_action,
+            remove_task=True,
+        )
+        return record
+
+    def _blockedTaskForOperatorAction(
+        self,
+        kind: str,
+        subject: str,
+    ) -> CleanupTaskRecord:
+        """Load a blocked task or raise explicit domain errors for operator actions."""
+
+        record = self.getCleanupTask(kind, subject)
+        if record is None:
+            raise CleanupTaskNotFoundError(
+                f"Cleanup task not found for kind={kind!r} subject={subject!r}."
+            )
+        if not record.blocked_at:
+            raise CleanupTaskNotBlockedError(
+                f"Cleanup task {kind!r} {subject!r} is not blocked."
+            )
+        return record
+
+    def _sessionBlockedTaskDismissAssessment(
+        self,
+        kind: str,
+        subject: str,
+        task: CleanupTaskRecord,
+    ) -> BlockedTaskDismissAssessment:
+        # Retrieve the session for that task
+        session = self.getSession(subject)
+
+        # If the session cannot be found, check for orphaned resources and linked accounts
+        if session is None:
+            orphaned_resource_count = len(self._sessionOrphanedLocalResourceIds(subject))
+            linked_account_count = self._countAccountsForSessionId(subject)
+
+            # If there are no orphaned resources or linked accounts, mark it as safe to dismiss
+            safe = orphaned_resource_count == 0 and linked_account_count == 0
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=safe,
+                cleanup_assured=safe,
+                local_resource_count=orphaned_resource_count,
+                local_related_record_count=linked_account_count,
+                subject_exists=False,
+                subject_state="",
+                resources_cleaned_at="",
+                reason=(
+                    "Session record is already gone and no orphaned local state remains."
+                    if safe
+                    else "Session record is missing, but orphaned resources or linked "
+                    "account state still remain locally."
+                ),
+            )
+
+        # Check session resource count and cleanup status
+        local_resource_count = len(self._sessionLocalResourceIds(session))
+        cleanup_assured = bool(session.resources_cleaned_at and local_resource_count == 0)
+
+        if kind == CLEANUP_TASK_SESSION_EXPIRE:
+            if session.state in TERMINAL_SESSION_STATES or not session.expires_at:
+                # Session either is already in a terminal state or does not have an expiry date
+                return BlockedTaskDismissAssessment(
+                    kind=kind,
+                    subject=subject,
+                    task_exists=True,
+                    task_blocked=bool(task.blocked_at),
+                    safe_to_dismiss=True,
+                    cleanup_assured=cleanup_assured,
+                    local_resource_count=local_resource_count,
+                    local_related_record_count=0,
+                    subject_exists=True,
+                    subject_state=session.state,
+                    resources_cleaned_at=session.resources_cleaned_at,
+                    reason=(
+                        "The session no longer needs an expiry task, so dismissing "
+                        "this blocked task is safe."
+                    ),
+                )
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=cleanup_assured,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=session.state,
+                resources_cleaned_at=session.resources_cleaned_at,
+                reason=(
+                    "The session is still open and still relies on this task to "
+                    "enter the cleanup lifecycle."
+                ),
+            )
+
+        if kind == CLEANUP_TASK_SESSION_CLEANUP:
+
+            # Session was already cleaned up so task is safe to dismiss
+            if cleanup_assured:
+                return BlockedTaskDismissAssessment(
+                    kind=kind,
+                    subject=subject,
+                    task_exists=True,
+                    task_blocked=bool(task.blocked_at),
+                    safe_to_dismiss=True,
+                    cleanup_assured=True,
+                    local_resource_count=local_resource_count,
+                    local_related_record_count=0,
+                    subject_exists=True,
+                    subject_state=session.state,
+                    resources_cleaned_at=session.resources_cleaned_at,
+                    reason=(
+                        "Local state already shows session cleanup completed, so "
+                        "dismissing this blocked task is safe."
+                    ),
+                )
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=False,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=session.state,
+                resources_cleaned_at=session.resources_cleaned_at,
+                reason=(
+                    "This task still owns session resource teardown. Dismissing it "
+                    "would abandon cleanup debt unless cleanup was verified."
+                ),
+            )
+
+        if kind == CLEANUP_TASK_SESSION_DELETE:
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=cleanup_assured,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=session.state,
+                resources_cleaned_at=session.resources_cleaned_at,
+                reason=(
+                    "The session row still exists, and this task still owns the "
+                    "delete phase. Dismissing it would leave retained session "
+                    "metadata behind unless it was already removed out of band."
+                ),
+            )
+
+        return BlockedTaskDismissAssessment(
+            kind=kind,
+            subject=subject,
+            task_exists=True,
+            task_blocked=bool(task.blocked_at),
+            safe_to_dismiss=False,
+            cleanup_assured=cleanup_assured,
+            local_resource_count=local_resource_count,
+            local_related_record_count=0,
+            subject_exists=True,
+            subject_state=session.state,
+            resources_cleaned_at=session.resources_cleaned_at,
+            reason="Unsupported session task kind.",
+        )
+
+    def _accountBlockedTaskDismissAssessment(
+        self,
+        kind: str,
+        subject: str,
+        task: CleanupTaskRecord,
+    ) -> BlockedTaskDismissAssessment:
+        account = self.getAccount(subject)
+        if account is None:
+            orphaned_resource_count = len(self._orphanedAccountLocalResourceIds(subject))
+            linked_session_count = len(self.listSessionsForAccount(subject))
+            safe = orphaned_resource_count == 0 and linked_session_count == 0
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=safe,
+                cleanup_assured=safe,
+                local_resource_count=orphaned_resource_count,
+                local_related_record_count=linked_session_count,
+                subject_exists=False,
+                subject_state="",
+                resources_cleaned_at="",
+                reason=(
+                    "Account record is already gone and no orphaned local state remains."
+                    if safe
+                    else "Account record is missing, but orphaned resources or linked "
+                    "sessions still remain locally."
+                ),
+            )
+
+        local_resource_count = len(self._accountLocalResourceIds(account))
+        cleanup_assured = bool(account.resources_cleaned_at and local_resource_count == 0)
+
+        if kind == CLEANUP_TASK_ACCOUNT_EXPIRE:
+            if account.status != ACCOUNT_STATE_ONBOARDED or not account.expires_at:
+                return BlockedTaskDismissAssessment(
+                    kind=kind,
+                    subject=subject,
+                    task_exists=True,
+                    task_blocked=bool(task.blocked_at),
+                    safe_to_dismiss=True,
+                    cleanup_assured=cleanup_assured,
+                    local_resource_count=local_resource_count,
+                    local_related_record_count=0,
+                    subject_exists=True,
+                    subject_state=account.status,
+                    resources_cleaned_at=account.resources_cleaned_at,
+                    reason=(
+                        "The account no longer needs an expiry task, so dismissing "
+                        "this blocked task is safe."
+                    ),
+                )
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=cleanup_assured,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=account.status,
+                resources_cleaned_at=account.resources_cleaned_at,
+                reason=(
+                    "The account is still onboarded and still relies on this task to "
+                    "enter the cleanup lifecycle."
+                ),
+            )
+
+        if kind == CLEANUP_TASK_ACCOUNT_CLEANUP:
+            if cleanup_assured:
+                return BlockedTaskDismissAssessment(
+                    kind=kind,
+                    subject=subject,
+                    task_exists=True,
+                    task_blocked=bool(task.blocked_at),
+                    safe_to_dismiss=True,
+                    cleanup_assured=True,
+                    local_resource_count=local_resource_count,
+                    local_related_record_count=0,
+                    subject_exists=True,
+                    subject_state=account.status,
+                    resources_cleaned_at=account.resources_cleaned_at,
+                    reason=(
+                        "Local state already shows account cleanup completed, so "
+                        "dismissing this blocked task  is safe."
+                    ),
+                )
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=False,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=account.status,
+                resources_cleaned_at=account.resources_cleaned_at,
+                reason=(
+                    "This task still owns account resource teardown. Dismissing it "
+                    "would abandon cleanup debt unless cleanup was verified."
+                ),
+            )
+
+        if kind == CLEANUP_TASK_ACCOUNT_DELETE:
+            return BlockedTaskDismissAssessment(
+                kind=kind,
+                subject=subject,
+                task_exists=True,
+                task_blocked=bool(task.blocked_at),
+                safe_to_dismiss=False,
+                cleanup_assured=cleanup_assured,
+                local_resource_count=local_resource_count,
+                local_related_record_count=0,
+                subject_exists=True,
+                subject_state=account.status,
+                resources_cleaned_at=account.resources_cleaned_at,
+                reason=(
+                    "The account row still exists, and this task still owns the "
+                    "delete phase. Dismissing it would leave retained account "
+                    "metadata behind unless it was already removed out of band."
+                ),
+            )
+
+        return BlockedTaskDismissAssessment(
+            kind=kind,
+            subject=subject,
+            task_exists=True,
+            task_blocked=bool(task.blocked_at),
+            safe_to_dismiss=False,
+            cleanup_assured=cleanup_assured,
+            local_resource_count=local_resource_count,
+            local_related_record_count=0,
+            subject_exists=True,
+            subject_state=account.status,
+            resources_cleaned_at=account.resources_cleaned_at,
+            reason="Unsupported account task kind.",
+        )
+
+    def _sessionLocalResourceIds(self, session: SessionRecord) -> list[str]:
+        """Collect locally known resource ids still associated with one session"""
+
+        eids: list[str] = []
+        seen: set[str] = set()
+        candidates = list(session.witness_eids)
+        if session.watcher_eid:
+            candidates.append(session.watcher_eid)
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForSession(kind="witness", session_id=session.session_id)
+        )
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForSession(kind="watcher", session_id=session.session_id)
+        )
+        for eid in candidates:
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            eids.append(eid)
+        return eids
+
+    def _sessionOrphanedLocalResourceIds(self, session_id: str) -> list[str]:
+        """Collect local resource ids that still point at a missing session id"""
+
+        eids: list[str] = []
+        seen: set[str] = set()
+        candidates = [
+            record.eid
+            for record in self.listResourcesForSession(kind="witness", session_id=session_id)
+        ]
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForSession(kind="watcher", session_id=session_id)
+        )
+        for eid in candidates:
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            eids.append(eid)
+        return eids
+
+    def _accountLocalResourceIds(self, account: AccountRecord) -> list[str]:
+        """Collect locally known resource ids still associated with one account"""
+
+        eids: list[str] = []
+        seen: set[str] = set()
+        sessions = self.listSessionsForAccount(account.account_aid)
+        candidates = list(account.witness_eids)
+        if account.watcher_eid:
+            candidates.append(account.watcher_eid)
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForAccount(kind="witness", account_aid=account.account_aid)
+        )
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForAccount(kind="watcher", account_aid=account.account_aid)
+        )
+        for session in sessions:
+            candidates.extend(self._sessionLocalResourceIds(session))
+        for eid in candidates:
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            eids.append(eid)
+        return eids
+
+    def _orphanedAccountLocalResourceIds(self, account_aid: str) -> list[str]:
+        """Collect local resource ids that still point at a missing account id"""
+
+        eids: list[str] = []
+        seen: set[str] = set()
+        sessions = self.listSessionsForAccount(account_aid)
+        candidates = [
+            record.eid
+            for record in self.listResourcesForAccount(kind="witness", account_aid=account_aid)
+        ]
+        candidates.extend(
+            record.eid
+            for record in self.listResourcesForAccount(kind="watcher", account_aid=account_aid)
+        )
+        for session in sessions:
+            candidates.extend(self._sessionLocalResourceIds(session))
+        for eid in candidates:
+            if not eid or eid in seen:
+                continue
+            seen.add(eid)
+            eids.append(eid)
+        return eids
+
+    def _countAccountsForSessionId(self, session_id: str) -> int:
+        """Count account records that still point at one session id"""
+
+        count = 0
+        for _, record in self.baser.accounts.getTopItemIter(keys=()):
+            if record.session_id == session_id:
+                count += 1
+        return count
+
+    def _buildCleanupAdminActionRecord(
+        self,
+        *,
+        action: str,
+        task: CleanupTaskRecord,
+        now: str,
+        actor: str,
+        operator_reason: str,
+        forced: bool,
+        assessment: BlockedTaskDismissAssessment | None,
+        task_blocked_at: str,
+        task_blocked_reason: str,
+        task_last_error: str,
+        task_attempt_count: int,
+        task_first_failed_at: str,
+    ) -> CleanupAdminActionRecord:
+        """Build one append-only audit record for an operator cleanup action."""
+
+        record = CleanupAdminActionRecord(
+            action_id=f"cada_{secrets.token_urlsafe(8)}",
+            logged_at=now,
+            action=action,
+            actor=actor,
+            kind=task.kind,
+            subject=task.subject,
+            forced=forced,
+            operator_reason=operator_reason,
+            task_blocked_at=task_blocked_at,
+            task_blocked_reason=task_blocked_reason,
+            task_last_error=task_last_error,
+            task_attempt_count=task_attempt_count,
+            task_first_failed_at=task_first_failed_at,
+            safe_to_dismiss=assessment.safe_to_dismiss if assessment is not None else False,
+            cleanup_assured=assessment.cleanup_assured if assessment is not None else False,
+            local_resource_count=assessment.local_resource_count if assessment is not None else 0,
+            local_related_record_count=(
+                assessment.local_related_record_count if assessment is not None else 0
+            ),
+            subject_exists=assessment.subject_exists if assessment is not None else False,
+            subject_state=assessment.subject_state if assessment is not None else "",
+            resources_cleaned_at=(
+                assessment.resources_cleaned_at if assessment is not None else ""
+            ),
+            assessment_reason=assessment.reason if assessment is not None else "",
+        )
+        return record
+
+    def _persistTaskOperatorAction(
+        self,
+        *,
+        task: CleanupTaskRecord,
+        previous_due_at: str,
+        admin_action: CleanupAdminActionRecord,
+        remove_task: bool,
+    ) -> None:
+        """Persist one task mutation and its audit record in one LMDB write."""
+
+        cleanup_tasks = self.baser.cleanup_tasks
+        cleanup_due = self.baser.cleanup_due
+        cleanup_admin_actions = self.baser.cleanup_admin_actions
+
+        with self.baser.env.begin(write=True, buffers=True) as txn:
+            if previous_due_at and (remove_task or previous_due_at != task.due_at):
+                txn.delete(
+                    cleanup_due._tokey((_dueIndexKey(previous_due_at), task.kind, task.subject)),
+                    db=cleanup_due.sdb,
+                )
+
+            if remove_task:
+                txn.delete(
+                    cleanup_tasks._tokey((task.kind, task.subject)),
+                    db=cleanup_tasks.sdb,
+                )
+            else:
+                txn.put(
+                    cleanup_tasks._tokey((task.kind, task.subject)),
+                    cleanup_tasks._ser(task),
+                    db=cleanup_tasks.sdb,
+                )
+                if task.due_at:
+                    due_record = CleanupDueRecord(
+                        kind=task.kind,
+                        subject=task.subject,
+                        due_at=task.due_at,
+                    )
+                    txn.put(
+                        cleanup_due._tokey((_dueIndexKey(task.due_at), task.kind, task.subject)),
+                        cleanup_due._ser(due_record),
+                        db=cleanup_due.sdb,
+                    )
+
+            txn.put(
+                cleanup_admin_actions._tokey((admin_action.action_id,)),
+                cleanup_admin_actions._ser(admin_action),
+                db=cleanup_admin_actions.sdb,
+            )
+
+    def listCleanupAdminActions(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> list[CleanupAdminActionRecord]:
+        """Return cleanup admin actions ordered from newest to oldest"""
+
+        rows = [record for _, record in self.baser.cleanup_admin_actions.getTopItemIter(keys=())]
+        rows.sort(
+            key=lambda record: (_sortValue(record.logged_at), _sortValue(record.action_id)),
+            reverse=True,
+        )
+        if limit is not None:
+            return rows[:limit]
+        return rows
 
     def _saveCleanupTask(
         self,

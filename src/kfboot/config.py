@@ -258,6 +258,10 @@ class Config:
     cleanup_failure_backoff_max_seconds: float = 900.0
     # Random jitter added to cleanup retry delays to avoid synchronized retries
     cleanup_failure_jitter_seconds: float = 5.0
+    # Block a poisoned cleanup task once it has failed this many times
+    cleanup_block_after_attempts: int = 10
+    # Block a poisoned cleanup task once it has been failing this long
+    cleanup_block_after_failure_age_seconds: float = 86400.0
     # Retention delay after account cleanup before final account deletion is allowed
     expired_account_retention_seconds: float = 0.0
 
@@ -287,6 +291,10 @@ class Config:
             )
         if self.cleanup_failure_jitter_seconds < 0:
             raise ValueError("cleanup_failure_jitter_seconds must be greater than or equal to 0.")
+        if self.cleanup_block_after_attempts <= 0:
+            raise ValueError("cleanup_block_after_attempts must be greater than 0.")
+        if self.cleanup_block_after_failure_age_seconds <= 0:
+            raise ValueError("cleanup_block_after_failure_age_seconds must be greater than 0.")
         if self.expired_account_retention_seconds < 0:
             raise ValueError("expired_account_retention_seconds must be greater than or equal to 0.")
         if self.cleanup_interval_seconds < 0:
@@ -391,6 +399,8 @@ class Config:
             f"Cleanup failure backoff seconds: {self.cleanup_failure_backoff_seconds}\n"
             f"Cleanup failure backoff max seconds: {self.cleanup_failure_backoff_max_seconds}\n"
             f"Cleanup failure jitter seconds: {self.cleanup_failure_jitter_seconds}\n"
+            f"Cleanup block after attempts: {self.cleanup_block_after_attempts}\n"
+            f"Cleanup block after failure age seconds: {self.cleanup_block_after_failure_age_seconds}\n"
             f"Expired account retention seconds: {self.expired_account_retention_seconds}\n"
         )
 
@@ -509,6 +519,12 @@ class Config:
             ),
             cleanup_failure_jitter_seconds=float(
                 _env("CLEANUP_FAILURE_JITTER_SECONDS", "5")
+            ),
+            cleanup_block_after_attempts=int(
+                _env("CLEANUP_BLOCK_AFTER_ATTEMPTS", "10")
+            ),
+            cleanup_block_after_failure_age_seconds=float(
+                _env("CLEANUP_BLOCK_AFTER_FAILURE_AGE_SECONDS", "86400")
             ),
             expired_account_retention_seconds=float(
                 _env("EXPIRED_ACCOUNT_RETENTION_SECONDS", "0")

@@ -235,3 +235,68 @@ Optional environment:
 - `KF_BOOT_ONBOARDING_PATH`
 - `KF_BOOT_ACCOUNT_PATH`
 - `KF_BOOT_SESSION_TTL_SECONDS`
+
+
+## CLI Commands
+
+`kf-boot` has two roles:
+
+- running the boot service
+- local operator inspection and repair of blocked cleanup tasks
+
+Start the server:
+
+```bash
+kf-boot
+```
+
+or explicitly:
+
+```bash
+kf-boot serve
+```
+
+Blocked cleanup task commands operate directly on the local LMDB store and are
+intended for local operator use on the same machine:
+
+```bash
+kf-boot cleanup blocked list --db-path ./var/kf-boot
+kf-boot cleanup blocked show --db-path ./var/kf-boot KIND SUBJECT
+kf-boot cleanup blocked requeue --db-path ./var/kf-boot --reason "operator note" KIND SUBJECT
+kf-boot cleanup blocked dismiss --db-path ./var/kf-boot KIND SUBJECT
+```
+
+Common options:
+
+- `--db-path` points at the local `kf-boot` LMDB store. When omitted, the CLI
+  uses `KF_BOOT_DB_PATH` or `./var/kf-boot`.
+- `--actor NAME` optionally overrides the local operator name stored in the
+  cleanup action audit trail for `requeue` and `dismiss`.
+- `list --kind KIND` filters blocked tasks to one cleanup kind. `KIND` must be
+  one of the known cleanup task kinds.
+- `list --limit N` limits how many blocked tasks are shown. `N` must be greater
+  than `0`.
+
+Blocked task workflow:
+
+1. Run `list` to see which cleanup tasks are blocked.
+2. Run `show` for one task to inspect `blocked_reason`, `last_error`,
+   `attempt_count`, and the dismiss safety assessment.
+3. If the root cause is fixed and cleanup should run again, use `requeue`.
+4. If the task is redundant or cleanup was already handled, use `dismiss`.
+
+Important behavior:
+
+- `requeue` clears the blocked state and makes the task due immediately so the
+  cleanup runner can try it again on the next sweep.
+- `requeue` requires `--reason` so the audit trail records why the operator put
+  the blocked task back on the runnable queue.
+- `dismiss` removes the blocked task queue record only. It does not perform
+  cleanup by itself.
+- `show` prints a local safety assessment for dismissal:
+  - `dismiss_safe: yes` means local state suggests the task is redundant or the
+    cleanup phase is already complete, meaning the queue record is safe to dismiss.
+  - `dismiss_safe: no` means dismissing the task would likely abandon cleanup debt.
+- `dismiss` refuses unsafe removals by default. Use `--force --reason ...` only
+  after an operator has verified that cleanup really happened and only the
+  blocked queue record should be removed.
