@@ -833,12 +833,8 @@ class Expirer:
         immediate_block: bool = False,
     ) -> bool:
         """Return True when a failed cleanup task should be quarantined."""
-        attempt_limit = getattr(self.ctx.config, "cleanup_block_after_attempts", 10)
-        failure_age_limit = getattr(
-            self.ctx.config,
-            "cleanup_block_after_failure_age_seconds",
-            86400.0,
-        )
+        attempt_limit = self.ctx.config.cleanup_block_after_attempts
+        failure_age_limit = self.ctx.config.cleanup_block_after_failure_age_seconds
 
         # Check for the immediate_block flag 
         if immediate_block:
@@ -896,12 +892,8 @@ class Expirer:
         3 - The task has exceeded the configured retry attempt limit
         4 - The task has exceeded the configured failure time limit
         """
-        attempt_limit = getattr(self.ctx.config, "cleanup_block_after_attempts", 10)
-        failure_age_limit = getattr(
-            self.ctx.config,
-            "cleanup_block_after_failure_age_seconds",
-            86400.0,
-        )
+        attempt_limit = self.ctx.config.cleanup_block_after_attempts
+        failure_age_limit = self.ctx.config.cleanup_block_after_failure_age_seconds
 
         if immediate_block:
             return (

@@ -28,7 +28,7 @@ def test_cli_blocked_list_prints_summary(tmp_path, capsys):
     # Capture the output
     output = capsys.readouterr().out
 
-    # Asser that the output is accurate
+    # Assert that the output is accurate
     assert CLEANUP_TASK_SESSION_EXPIRE in output
     assert session_id in output
     assert "blocked_at=2024-01-01T00:00:06+00:00" in output
@@ -206,7 +206,7 @@ def test_cli_blocked_dismiss_allows_safe_orphan_task(tmp_path, capsys):
     # Create a blocked orphan task
     db_path = makeBlockedOrphanTask(tmp_path)
 
-    # Attempt to dimiss the task
+    # Attempt to dismiss the task
     cli.main([
         "cleanup",
         "blocked",
