@@ -107,6 +107,7 @@ Onboarding routes:
 - `exn /onboarding/account/create`
 - `exn /onboarding/complete`
 - `exn /onboarding/cancel`
+- `exn /operations/status`
 
 Approved-account routes:
 
@@ -116,6 +117,7 @@ Approved-account routes:
 - `exn /account/delete`
 - `exn /account/witnesses/delete`
 - `exn /account/watchers/delete`
+- `exn /operations/status`
 
 There is no JSON bearer-session flow for these routes.
 There are no authenticated `qry` routes in this slice.
@@ -133,8 +135,9 @@ There are no authenticated `qry` routes in this slice.
 The service runs under one root HIO `Doist`:
 
 - Falcon is served by an HIO HTTP server doer.
+- downstream witness/watcher boot calls run as HIO client work through the boot operation worker.
+- request handlers persist boot operation intent and return signed status payloads without blocking on downstream boot APIs.
 - periodic lifecycle cleanup is a normal HIO doer on the same runtime.
-- downstream witness/watcher boot calls still use the synchronous boot client.
 
 The server does not manually trust `serder.pre` as an auth substitute.
 Business handlers run only after the request has been parsed through the KRAM-enabled `Kevery`.
@@ -145,9 +148,9 @@ Business handlers run only after the request has been parsed through the KRAM-en
 2. `locksmith` creates a hidden ephemeral onboarding AID locally.
 3. `locksmith` sends the ephemeral inception or keystate material to the onboarding surface.
 4. `locksmith` sends authenticated `exn /onboarding/session/start`.
-5. `kf-boot` allocates the witness pool before permanent account inception.
-6. `kf-boot` creates the required hosted watcher and records the allocated resources before replying.
-7. `kf-boot` replies with a signed boot-server `exn` and prepended boot-server KEL.
+5. `kf-boot` creates or reuses a durable session provisioning operation and replies with a signed boot-server `exn`.
+6. The root HIO boot operation worker allocates the witness pool and required hosted watcher.
+7. `locksmith` polls `exn /operations/status` or `exn /onboarding/session/status` until provisioning succeeds.
 8. `locksmith` creates the permanent local account AID using the returned witness list.
 9. `locksmith` finishes local witness registration and resolves witness and watcher OOBIs.
 10. `locksmith` sends authenticated `exn /onboarding/account/create`.
@@ -186,11 +189,14 @@ Required behavior:
 
 - onboarding sessions expire and can be marked expired on access
 - `/onboarding/session/start` reuses the same active session resources for retry instead of allocating duplicates
+- `/onboarding/session/start` returns a `session_provision_operation` while downstream resource allocation is pending
+- `/onboarding/account/create` rejects the request while session provisioning is pending or failed
 - `/onboarding/account/create` is idempotent within a session
 - `/onboarding/complete` is idempotent within a session
-- created witness and watcher ids are persisted before replies are sent
-- blind retry after a failed allocation does not create a second witness or watcher set
-- partial downstream failure moves the session to `failed`
+- watcher status, hosted-resource delete, and account delete routes return durable boot operations
+- retryable downstream failures leave the operation pending with `last_error`
+- non-retryable downstream failures, or retry exhaustion, fail the operation
+- blind retry after a partial allocation does not create a second witness or watcher set
 
 ## Development
 

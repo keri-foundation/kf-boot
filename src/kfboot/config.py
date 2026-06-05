@@ -42,6 +42,14 @@ ONBOARDING_ROUTES = {
     "/onboarding/cancel",
 }
 
+ONBOARDING_QUOTA_ROUTES = {
+    "/onboarding/session/start",
+    "/onboarding/session/status",
+    "/onboarding/account/create",
+    "/onboarding/complete",
+    "/onboarding/cancel",
+}
+
 ACCOUNT_ROUTES = {
     "/operations/status",
     "/account/witnesses",
