@@ -1,15 +1,11 @@
 from __future__ import annotations
 
+import json as jsoning
 from dataclasses import dataclass
 from typing import Any
 
 from hio.base import tyming
 from keri import help
-
-try:
-    import requests
-except ImportError:  # pragma: no cover - exercised only in thin local test envs
-    requests = None
 
 logger = help.ogler.getLogger(__name__)
 
@@ -23,96 +19,59 @@ class BootError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class BootClient:
-    base_url: str
-    timeout: float = 10.0
-
-    def allocateWitness(self, account_aid: str) -> dict:
-        """Allocate a hosted witness for the permanent account AID."""
-
-        return self._json("POST", "/witnesses", json={"aid": account_aid})
-
-    def createWitness(self, cid: str) -> dict:
-        return self.allocateWitness(cid)
-
-    def deleteWitness(self, eid: str) -> None:
-        self._empty("DELETE", f"/witnesses/{eid}")
-
-    def allocateWatcher(self, account_aid: str, oobi: str | None = None) -> dict:
-        """Allocate a hosted watcher for the permanent account AID."""
-
-        payload = {"aid": account_aid}
-        if oobi:
-            payload["oobi"] = oobi
-        return self._json("POST", "/watchers", json=payload)
-
-    def createWatcher(self, cid: str, oobi: str | None = None) -> dict:
-        return self.allocateWatcher(cid, oobi=oobi)
-
-    def deleteWatcher(self, eid: str) -> None:
-        self._empty("DELETE", f"/watchers/{eid}")
-
-    def watcherStatus(self, eid: str) -> dict:
-        return self._json("GET", f"/watchers/{eid}/status")
-
-    def _json(self, method: str, path: str, json: dict | None = None) -> dict:
-        response = self._request(method, path, json=json)
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise BootError(
-                f"Invalid JSON from boot API: {exc}",
-                status_code=response.status_code,
-            ) from exc
-
-    def _empty(self, method: str, path: str) -> None:
-        self._request(method, path)
-
-    def _request(
-        self, method: str, path: str, json: dict | None = None
-    ):
-        if requests is None:
-            logger.error(
-                "Boot API client cannot make request because requests library is not available",
-            )
-            raise BootError("requests is required to call the downstream boot API")
-        url = f"{self.base_url}{path}"
-        logger.debug(
-            "Boot API request starting",
-        )
-        try:
-            response = requests.request(
-                method,
-                url,
-                json=json,
-                timeout=self.timeout,
-            )
-        except requests.RequestException as exc:
-            logger.warning(
-                f"BOOT API request failed due to request exception error: `{exc}`",
-            )
-            raise BootError(f"Boot API request failed: {exc}") from exc
-
-        if response.status_code >= 400:
-            description = response.text.strip() or f"HTTP {response.status_code}"
-            logger.warning(
-                "BOOT API request failed: "
-                f"method={method} url={url} status={response.status_code} "
-                f"body={description!r}",
-            )
-            raise BootError(description, status_code=response.status_code)
-
-        logger.info(
-            f"BOOT API request succeeded: `{response}`",
-        )
-        return response
-
-
-@dataclass(frozen=True)
 class HioBootClient:
     base_url: str
     clienter: Any
     timeout: float = 10.0
+
+    def allocateWitnessDo(
+        self,
+        account_aid: str,
+        *,
+        idempotency_key: str = "",
+        tymth,
+        tock: float = 0.0,
+    ):
+        response = yield from self._requestDo(
+            "POST",
+            "/witnesses",
+            json={"aid": account_aid},
+            idempotency_key=idempotency_key,
+            tymth=tymth,
+            tock=tock,
+        )
+        return _responseJson(response)
+
+    def allocateWatcherDo(
+        self,
+        account_aid: str,
+        *,
+        oobi: str | None = None,
+        idempotency_key: str = "",
+        tymth,
+        tock: float = 0.0,
+    ):
+        payload = {"aid": account_aid}
+        if oobi:
+            payload["oobi"] = oobi
+        response = yield from self._requestDo(
+            "POST",
+            "/watchers",
+            json=payload,
+            idempotency_key=idempotency_key,
+            tymth=tymth,
+            tock=tock,
+        )
+        return _responseJson(response)
+
+    def watcherStatusDo(self, eid: str, *, tymth, tock: float = 0.0):
+        response = yield from self._requestDo(
+            "GET",
+            f"/watchers/{eid}/status",
+            tymth=tymth,
+            tock=tock,
+        )
+        return _responseJson(response)
 
     def deleteWitnessDo(self, eid: str, *, tymth, tock: float = 0.0):
         yield from self._emptyDo("DELETE", f"/witnesses/{eid}", tymth=tymth, tock=tock)
@@ -123,10 +82,29 @@ class HioBootClient:
     def _emptyDo(self, method: str, path: str, *, tymth, tock: float = 0.0):
         yield from self._requestDo(method, path, tymth=tymth, tock=tock)
 
-    def _requestDo(self, method: str, path: str, *, tymth, tock: float = 0.0):
+    def _requestDo(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        idempotency_key: str = "",
+        tymth,
+        tock: float = 0.0,
+    ):
         url = f"{self.base_url}{path}"
+        headers = None
+        body = None
+        if json is not None:
+            headers = {"Content-Type": "application/json"}
+            if idempotency_key:
+                headers["Idempotency-Key"] = idempotency_key
+            body = jsoning.dumps(json, separators=(",", ":")).encode("utf-8")
         try:
-            client = self.clienter.request(method, url)
+            if body is None and headers is None:
+                client = self.clienter.request(method, url)
+            else:
+                client = self.clienter.request(method, url, headers=headers, body=body)
         except Exception as exc:
             logger.warning(
                 f"BOOT API request failed due to HIO client exception: `{exc}`",
@@ -184,3 +162,18 @@ def _responseBodyText(response: Any) -> str:
     if isinstance(body, bytes):
         return body.decode("utf-8", errors="replace").strip()
     return str(body or "").strip()
+
+
+def _responseJson(response: Any) -> dict[str, Any]:
+    status = _responseStatus(response)
+    body = _responseBodyText(response)
+    try:
+        data = jsoning.loads(body)
+    except ValueError as exc:
+        raise BootError(
+            f"Invalid JSON from boot API: {exc}",
+            status_code=status,
+        ) from exc
+    if not isinstance(data, dict):
+        raise BootError("Invalid JSON from boot API: expected object", status_code=status)
+    return data

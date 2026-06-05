@@ -148,14 +148,6 @@ class FailingWitnessDeleteClient:
         raise BootError("remote delete failed", status_code=self.status_code)
 
 
-class SyncWitnessDeleteClient:
-    def __init__(self):
-        self.calls: list[str] = []
-
-    def deleteWitness(self, eid: str):
-        self.calls.append(eid)
-
-
 def test_cleanup_doer_yields_back_to_root_runtime_between_sweep_steps():
     events: list[str] = []
     expirer = YieldingExpirer(events)
@@ -438,31 +430,3 @@ def test_delete_hosted_resource_do_tolerates_remote_404_and_removes_local_bindin
     assert store.getResource("witness", "W1") is None
     assert account.witness_eids == []
     assert store.saved_accounts == [account]
-
-
-def test_sync_delete_hosted_resource_still_uses_sync_boot_client():
-    store = ResourceStore()
-    account = AccountRecord(account_aid="AID_ACCOUNT", witness_eids=["W1"])
-    sync_client = SyncWitnessDeleteClient()
-    cleanup_client = YieldingWitnessDeleteClient()
-    ctx = SimpleNamespace(
-        store=store,
-        witness_boots={"wit-1": sync_client},
-        watcher_boot=None,
-        config=SimpleNamespace(witness_backends=()),
-    )
-    provisioner = Provisioner(ctx, exchanger=None)
-    provisioner.configureCleanupBootClients(
-        witness_boots={"wit-1": cleanup_client},
-        watcher_boot=None,
-    )
-
-    provisioner.deleteHostedResource(
-        kind="witness",
-        eid="W1",
-        account=account,
-    )
-
-    assert sync_client.calls == ["W1"]
-    assert cleanup_client.calls == []
-    assert store.deleted == [("witness", "W1")]

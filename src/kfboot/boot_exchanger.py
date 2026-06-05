@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import falcon
@@ -14,6 +14,13 @@ from kfboot.basing import (
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
     ACCOUNT_STATE_EXPIRED,
+    BOOT_OPERATION_ACCOUNT_DELETE,
+    BOOT_OPERATION_FAILED,
+    BOOT_OPERATION_PENDING,
+    BOOT_OPERATION_RESOURCE_DELETE,
+    BOOT_OPERATION_RUNNING,
+    BOOT_OPERATION_SESSION_PROVISION,
+    BOOT_OPERATION_WATCHER_STATUS_QUERY,
     AccountRecord,
     SESSION_STATE_ACCOUNT_CREATED,
     SESSION_STATE_CANCELLED,
@@ -23,7 +30,6 @@ from kfboot.basing import (
     TERMINAL_SESSION_STATES,
     SessionRecord,
 )
-from kfboot.boot_client import BootError
 from kfboot.store import (
     accountFailed,
     nowIso,
@@ -33,7 +39,7 @@ from kfboot.limiting import Limiter
 from kfboot.admitting import Admitter
 from kfboot.provisioning import Provisioner
 from kfboot.expiring import Expirer
-from kfboot.utils import extractExnPayload, optionalStr, requiredStr, bootErrorToHTTP
+from kfboot.utils import extractExnPayload, optionalStr, requiredStr
 
 logger = help.ogler.getLogger(__name__)
 
@@ -257,16 +263,11 @@ class SessionStartHandler(RouteHandler):
                 f"Session created for account {account_aid}",
             )
 
-        try:
-            self.exchanger.provisioner.provisionSessionResources(session=session)
-        except BootError as exc:
-            # mark session failed, attempt teardown, then map to HTTP error
-            self.exchanger.expirer.failSession(session=session, reason=str(exc), teardown=True)
-            raise bootErrorToHTTP(exc)
-        except Exception as exc:
-            # unexpected error: mark session failed and re-raise
-            self.exchanger.expirer.failSession(session=session, reason=str(exc), teardown=True)
-            raise
+        self.exchanger.ensureSessionProvisionOperation(
+            session=session,
+            requester=sender,
+            route=self.resource,
+        )
         self.exchanger.expirer.refreshSessionLease(session)
         self.exchanger.replySession(self.resource, receiver=sender, session=session)
 
@@ -311,14 +312,11 @@ class AccountCreateHandler(RouteHandler):
                 description="This onboarding session is already bound to a different account AID.",
             )
 
+        self.exchanger.requireSessionProvisioned(session)
+
         if not session.witness_eids or (session.watcher_required and not session.watcher_eid):
             logger.error(
                 f"Hosted resources missing during account creation for session {session.session_id}"
-            )
-            self.exchanger.expirer.failSession(
-                session=session,
-                reason="Hosted resources were not fully allocated before account creation.",
-                teardown=True,
             )
             raise falcon.HTTPConflict(
                 title="Resources missing",
@@ -498,23 +496,8 @@ class CancelHandler(RouteHandler):
             )
         if session.state != SESSION_STATE_CANCELLED:
             account = self.exchanger.ctx.store.getAccount(session.account_aid) if session.account_aid else None
-            try:
-                self.exchanger.provisioner.teardownSessionResources(session=session, account=account)
-            except BootError as exc:
-                self.exchanger.expirer.failSession(
-                    session=session,
-                    reason=f"Hosted resource teardown failed during cancellation: {exc}",
-                    account=account,
-                )
-                logger.warning(
-                    f"Session cancellation failed during resource teardown for session {session.session_id}"
-                )
-                raise bootErrorToHTTP(exc)
-
             session.state = SESSION_STATE_CANCELLED
             session.updated_at = nowIso()
-            # Set cleaned flag
-            session.resources_cleaned_at = session.updated_at
             self.exchanger.ctx.store.saveSession(session)
             logger.info(
                 f"Session cancelled for session {session.session_id}"
@@ -522,8 +505,6 @@ class CancelHandler(RouteHandler):
 
             failed = accountFailed(account)
             if failed is not None:
-                failed.resources_cleaned_at = session.updated_at
-                failed.session_id = ""
                 self.exchanger.ctx.store.saveAccount(failed)
                 logger.info(
                     f"Account failed due to session cancellation for account AID {account.account_aid}"
@@ -548,12 +529,16 @@ class AccountWitnessesHandler(RouteHandler):
         rows = resourcesToApi(
             self.exchanger.ctx.store.listResourcesForAccount(kind="witness", account_aid=sender)
         )
+        account_delete = self.exchanger.activeAccountDeleteOperation(sender)
         self.exchanger.expirer.refreshAccountLease(account)
         self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
         logger.info(
             f"Query response for witnesses for account AID {sender}: {rows}"
         )
-        self.exchanger.queueReply(self.resource, sender, {"account_aid": sender, "witnesses": rows})
+        payload = {"account_aid": sender, "witnesses": rows}
+        if account_delete is not None:
+            payload["account_delete_operation"] = self.exchanger.ctx.store.bootOperationPayload(account_delete)
+        self.exchanger.queueReply(self.resource, sender, payload)
 
 
 class AccountWatchersHandler(RouteHandler):
@@ -572,12 +557,16 @@ class AccountWatchersHandler(RouteHandler):
         rows = resourcesToApi(
             self.exchanger.ctx.store.listResourcesForAccount(kind="watcher", account_aid=sender)
         )
+        account_delete = self.exchanger.activeAccountDeleteOperation(sender)
         self.exchanger.expirer.refreshAccountLease(account)
         self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
         logger.info(
             f"Query response for watchers for account AID {sender}: {rows}"
         )
-        self.exchanger.queueReply(self.resource, sender, {"account_aid": sender, "watchers": rows})
+        payload = {"account_aid": sender, "watchers": rows}
+        if account_delete is not None:
+            payload["account_delete_operation"] = self.exchanger.ctx.store.bootOperationPayload(account_delete)
+        self.exchanger.queueReply(self.resource, sender, payload)
 
 
 class AccountWatcherStatusHandler(RouteHandler):
@@ -594,6 +583,7 @@ class AccountWatcherStatusHandler(RouteHandler):
         sender = serder.pre
         payload = extractExnPayload(serder)
         account = self.exchanger.requireOnboardedAccount(sender, payload)
+        self.exchanger.requireNoAccountDeletePending(sender)
 
         watcher_id = optionalStr(payload, "watcher_eid") or requiredStr(payload, "watcher_id")
         logger.info(
@@ -606,31 +596,46 @@ class AccountWatcherStatusHandler(RouteHandler):
             )
             raise falcon.HTTPNotFound(title="Watcher not found")
 
-        try:
-            status = self.exchanger.ctx.watcher_boot.watcherStatus(watcher_id)
-        except BootError as exc:
-            logger.warning(
-                f"Query for watcher status failed for watcher {watcher_id} due to boot API error: {exc}"
-            )
-            raise bootErrorToHTTP(exc)
-
-        derived_status = _watcherStatusLabel(status)
-        if derived_status:
-            record.status = derived_status
-            self.exchanger.ctx.store.saveResource(record)
-            logger.info(
-                f"Watcher status updated for watcher {watcher_id} to {derived_status} from {sender}"
-            )
-
         watcher = resourcesToApi([record])[0]
-        if isinstance(status, dict):
-            watcher.update(status)
+        delete_operation = self.exchanger.ctx.store.findActiveBootOperation(
+            kind=BOOT_OPERATION_RESOURCE_DELETE,
+            subject=f"watcher:{watcher_id}",
+            requester=sender,
+        )
+        if delete_operation is not None:
+            self.exchanger.expirer.refreshAccountLease(account)
+            self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
+            self.exchanger.queueReply(
+                self.resource,
+                sender,
+                {
+                    "account_aid": sender,
+                    "watcher": watcher,
+                    "watcher_id": watcher_id,
+                    "operation": self.exchanger.ctx.store.bootOperationPayload(delete_operation),
+                },
+            )
+            return
+
+        operation = self.exchanger.ctx.store.ensureBootOperation(
+            kind=BOOT_OPERATION_WATCHER_STATUS_QUERY,
+            subject=f"watcher:{watcher_id}",
+            requester=sender,
+            route=self.resource,
+            payload={"account_aid": sender, "watcher_id": watcher_id},
+            due_at=nowIso(),
+        )
         self.exchanger.expirer.refreshAccountLease(account)
         self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
         self.exchanger.queueReply(
             self.resource,
             sender,
-            {"account_aid": sender, "watcher": watcher, "watcher_id": watcher_id},
+            {
+                "account_aid": sender,
+                "watcher": watcher,
+                "watcher_id": watcher_id,
+                "operation": self.exchanger.ctx.store.bootOperationPayload(operation),
+            },
         )
 
 
@@ -648,6 +653,7 @@ class AccountWitnessDeleteHandler(RouteHandler):
         sender = serder.pre
         payload = extractExnPayload(serder)
         account = self.exchanger.requireOnboardedAccount(sender, payload)
+        self.exchanger.requireNoAccountDeletePending(sender)
         witness_id = optionalStr(payload, "witness_eid") or requiredStr(payload, "witness_id")
         logger.info(
             f"Account witness delete requested for witness {witness_id} from {sender}"
@@ -659,24 +665,30 @@ class AccountWitnessDeleteHandler(RouteHandler):
             )
             raise falcon.HTTPNotFound(title="Witness not found")
 
-        try:
-            self.exchanger.provisioner.deleteHostedResource(
-                kind="witness",
-                eid=witness_id,
-                account=account,
-            )
-        except BootError as exc:
-            logger.warning(
-                f"Account witness delete failed for witness {witness_id} from {sender}: {exc}"
-            )
-            raise bootErrorToHTTP(exc)
-
+        operation = self.exchanger.ctx.store.ensureBootOperation(
+            kind=BOOT_OPERATION_RESOURCE_DELETE,
+            subject=f"witness:{witness_id}",
+            requester=sender,
+            route=self.resource,
+            payload={
+                "account_aid": sender,
+                "resource_kind": "witness",
+                "resource_id": witness_id,
+                "session_id": record.session_id,
+            },
+            due_at=nowIso(),
+        )
         self.exchanger.expirer.refreshAccountLease(account)
         self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
         self.exchanger.queueReply(
             self.resource,
             sender,
-            {"account_aid": sender, "witness_id": witness_id, "deleted": True},
+            {
+                "account_aid": sender,
+                "witness_id": witness_id,
+                "deleted": False,
+                "operation": self.exchanger.ctx.store.bootOperationPayload(operation),
+            },
         )
 
 
@@ -694,6 +706,7 @@ class AccountWatcherDeleteHandler(RouteHandler):
         sender = serder.pre
         payload = extractExnPayload(serder)
         account = self.exchanger.requireOnboardedAccount(sender, payload)
+        self.exchanger.requireNoAccountDeletePending(sender)
         watcher_id = optionalStr(payload, "watcher_eid") or requiredStr(payload, "watcher_id")
         logger.info(
             f"Account watcher delete requested for watcher {watcher_id} from {sender}"
@@ -705,24 +718,30 @@ class AccountWatcherDeleteHandler(RouteHandler):
             )
             raise falcon.HTTPNotFound(title="Watcher not found")
 
-        try:
-            self.exchanger.provisioner.deleteHostedResource(
-                kind="watcher",
-                eid=watcher_id,
-                account=account,
-            )
-        except BootError as exc:
-            logger.warning(
-                f"Account watcher delete failed for watcher {watcher_id} from {sender}: {str(exc)}"
-            )
-            raise bootErrorToHTTP(exc)
-
+        operation = self.exchanger.ctx.store.ensureBootOperation(
+            kind=BOOT_OPERATION_RESOURCE_DELETE,
+            subject=f"watcher:{watcher_id}",
+            requester=sender,
+            route=self.resource,
+            payload={
+                "account_aid": sender,
+                "resource_kind": "watcher",
+                "resource_id": watcher_id,
+                "session_id": record.session_id,
+            },
+            due_at=nowIso(),
+        )
         self.exchanger.expirer.refreshAccountLease(account)
         self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
         self.exchanger.queueReply(
             self.resource,
             sender,
-            {"account_aid": sender, "watcher_id": watcher_id, "deleted": True},
+            {
+                "account_aid": sender,
+                "watcher_id": watcher_id,
+                "deleted": False,
+                "operation": self.exchanger.ctx.store.bootOperationPayload(operation),
+            },
         )
 
 
@@ -747,21 +766,88 @@ class AccountDeleteHandler(RouteHandler):
             f"Account delete requested for account AID {account_aid}"
         )
 
-        try:
-            self.exchanger.provisioner.deleteAccount(account_aid=sender, account=account)
-        except BootError as exc:
-            logger.warning(
-                f"Account delete failed for account AID {account_aid}: {exc}"
+        if account is None:
+            operations = self.exchanger.ctx.store.listBootOperations(
+                kind=BOOT_OPERATION_ACCOUNT_DELETE,
+                subject=f"account:{sender}",
+                requester=sender,
             )
-            raise bootErrorToHTTP(exc)
+            latest = operations[0] if operations else None
+            payload = {"account_aid": sender, "deleted": True}
+            if latest is not None:
+                payload["operation"] = self.exchanger.ctx.store.bootOperationPayload(latest)
+            self.exchanger.queueReply(self.resource, sender, payload)
+            return
 
-        logger.info(
-            f"Account deleted for account AID {sender}"
+        operation = self.exchanger.ctx.store.ensureBootOperation(
+            kind=BOOT_OPERATION_ACCOUNT_DELETE,
+            subject=f"account:{sender}",
+            requester=sender,
+            route=self.resource,
+            payload={"account_aid": sender},
+            due_at=nowIso(),
         )
         self.exchanger.queueReply(
             self.resource,
             sender,
-            {"account_aid": sender, "deleted": True},
+            {
+                "account_aid": sender,
+                "deleted": False,
+                "operation": self.exchanger.ctx.store.bootOperationPayload(operation),
+            },
+        )
+
+
+class OperationStatusHandler(RouteHandler):
+    resource = "/operations/status"
+
+    def handleEvent(self, serder, **kwa):
+        sender = serder.pre
+        payload = extractExnPayload(serder)
+        operation_id = requiredStr(payload, "operation_id")
+        operation = self.exchanger.ctx.store.getBootOperation(operation_id)
+        if operation is None:
+            logger.warning(
+                f"Operation status request failed because operation {operation_id} was not found"
+            )
+            raise falcon.HTTPNotFound(
+                title="Operation not found",
+                description=f"No boot operation exists for '{operation_id}'.",
+            )
+
+        operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
+        allowed = bool(sender and sender == operation.requester)
+        if not allowed and operation.kind == BOOT_OPERATION_SESSION_PROVISION:
+            session_id = str(operation_payload.get("session_id") or operation.subject)
+            session = self.exchanger.ctx.store.getSession(session_id)
+            allowed = session is not None and sender in {session.ephemeral_aid, session.account_aid}
+        elif not allowed and operation.kind == BOOT_OPERATION_WATCHER_STATUS_QUERY:
+            watcher_id = str(operation_payload.get("watcher_id") or "")
+            resource = self.exchanger.ctx.store.getResource("watcher", watcher_id)
+            allowed = resource is not None and sender in {resource.principal, resource.cid}
+        elif not allowed and operation.kind == BOOT_OPERATION_RESOURCE_DELETE:
+            resource_kind = str(operation_payload.get("resource_kind") or "")
+            resource_id = str(operation_payload.get("resource_id") or "")
+            resource = self.exchanger.ctx.store.getResource(resource_kind, resource_id)
+            allowed = resource is not None and sender in {resource.principal, resource.cid}
+        elif not allowed and operation.kind == BOOT_OPERATION_ACCOUNT_DELETE:
+            allowed = sender == str(operation_payload.get("account_aid") or "")
+        elif not allowed:
+            allowed = operation.subject == sender
+
+        if not allowed:
+            logger.warning(
+                f"Operation status request rejected for sender {sender} on operation {operation.operation_id}"
+            )
+            raise falcon.HTTPUnauthorized(
+                title="Wrong operation principal",
+                description="The authenticated sender is not allowed to read this operation.",
+            )
+
+        self.exchanger.queueReply(
+            self.resource,
+            sender,
+            {"operation": self.exchanger.ctx.store.bootOperationPayload(operation)},
         )
 
 
@@ -787,6 +873,7 @@ class BootExchanger(Exchanger):
             AccountWitnessesHandler(self),
             AccountWatchersHandler(self),
             AccountWatcherStatusHandler(self),
+            OperationStatusHandler(self),
             AccountDeleteHandler(self),
             AccountWitnessDeleteHandler(self),
             AccountWatcherDeleteHandler(self),
@@ -804,8 +891,10 @@ class BootExchanger(Exchanger):
         self.reply_streams.clear()
         self.last_error = None
 
-    def setClientIp(self, client_ip: str) -> None:
-        self.client_ip = client_ip
+    def setClientIp(self, client_ip: Any) -> None:
+        if isinstance(client_ip, tuple):
+            client_ip = client_ip[0] if client_ip else ""
+        self.client_ip = str(client_ip or "").strip()
 
     
 
@@ -1004,6 +1093,73 @@ class BootExchanger(Exchanger):
 
         return expires_at <= datetime.fromisoformat(nowIso())
 
+    def ensureSessionProvisionOperation(
+        self,
+        *,
+        session: SessionRecord,
+        requester: str,
+        route: str,
+    ):
+        latest = self._latestSessionProvisionOperation(session)
+        if session.witness_eids and (not session.watcher_required or session.watcher_eid):
+            return latest
+
+        return self.ctx.store.ensureBootOperation(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session.session_id,
+            requester=requester,
+            route=route,
+            payload={
+                "session_id": session.session_id,
+                "account_aid": session.account_aid,
+                "witness_count": session.witness_count,
+                "watcher_required": session.watcher_required,
+            },
+            due_at=nowIso(),
+        )
+
+    def requireSessionProvisioned(self, session: SessionRecord) -> None:
+        operation = self._latestSessionProvisionOperation(session)
+        if operation is not None and operation.state in {
+            BOOT_OPERATION_PENDING,
+            BOOT_OPERATION_RUNNING,
+        }:
+            logger.warning(
+                f"Account creation rejected because session {session.session_id} provisioning is {operation.state}"
+            )
+            raise falcon.HTTPConflict(
+                title="Session provisioning pending",
+                description="Hosted resource provisioning is still in progress for this session.",
+            )
+
+        if operation is not None and operation.state == BOOT_OPERATION_FAILED:
+            logger.warning(
+                f"Account creation rejected because session {session.session_id} provisioning failed"
+            )
+            raise falcon.HTTPConflict(
+                title="Session provisioning failed",
+                description=operation.last_error or "Hosted resource provisioning failed for this session.",
+            )
+
+    def activeAccountDeleteOperation(self, account_aid: str):
+        return self.ctx.store.findActiveBootOperation(
+            kind=BOOT_OPERATION_ACCOUNT_DELETE,
+            subject=f"account:{account_aid}",
+            requester=account_aid,
+        )
+
+    def requireNoAccountDeletePending(self, account_aid: str) -> None:
+        operation = self.activeAccountDeleteOperation(account_aid)
+        if operation is None:
+            return
+        logger.warning(
+            f"Account route rejected because account {account_aid} deletion is {operation.state}"
+        )
+        raise falcon.HTTPConflict(
+            title="Account deletion pending",
+            description="Account deletion is already pending for this account.",
+        )
+
     def requireDeletableAccount(self, sender: str, payload: dict[str, Any]) -> tuple[str, AccountRecord | None]:
         """Checks the identity of the sender and if the account is in a valid state for deletion"""
         account_aid = optionalStr(payload, "account_aid") 
@@ -1085,7 +1241,6 @@ class BootExchanger(Exchanger):
 
         return expires_at <= datetime.fromisoformat(nowIso())
 
-
     def replySession(self, route: str, *, receiver: str, session: SessionRecord) -> None:
         payload = self.sessionPayload(session)
         self.queueReply(route, receiver, payload)
@@ -1121,7 +1276,17 @@ class BootExchanger(Exchanger):
         payload["region_name"] = session.region_name
         if session.account_aid:
             payload["account_aid"] = session.account_aid
+        operation = self._latestSessionProvisionOperation(session)
+        if operation is not None:
+            payload["session_provision_operation"] = self.ctx.store.bootOperationPayload(operation)
         return payload
+
+    def _latestSessionProvisionOperation(self, session: SessionRecord):
+        operations = self.ctx.store.listBootOperations(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session.session_id,
+        )
+        return operations[0] if operations else None
 
     def queueReply(self, route: str, receiver: str, payload: dict[str, Any]) -> None:
         stream = bytearray(self.host_hab.replay())
@@ -1157,22 +1322,3 @@ class BootExchanger(Exchanger):
             )
             logger.exception("Exchange route handler failed: %s", exc)
             return None
-
-
-def _watcherStatusLabel(status: Any) -> str:
-    if not isinstance(status, dict):
-        return ""
-    if "status" in status and status.get("status"):
-        return str(status.get("status"))
-
-    summary = status.get("summary", {})
-    if not isinstance(summary, dict):
-        return ""
-
-    total = int(summary.get("total_witnesses", 0) or 0)
-    responsive = int(summary.get("responsive_witnesses", 0) or 0)
-    if total <= 0:
-        return "created"
-    if responsive >= total:
-        return "connected"
-    return "query_pending"

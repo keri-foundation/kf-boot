@@ -34,6 +34,7 @@ def _normalize_url(value: str) -> str:
 
 
 ONBOARDING_ROUTES = {
+    "/operations/status",
     "/onboarding/session/start",
     "/onboarding/session/status",
     "/onboarding/account/create",
@@ -42,6 +43,7 @@ ONBOARDING_ROUTES = {
 }
 
 ACCOUNT_ROUTES = {
+    "/operations/status",
     "/account/witnesses",
     "/account/watchers",
     "/account/watchers/status",

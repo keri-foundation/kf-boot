@@ -32,11 +32,26 @@ CLEANUP_TASK_ACCOUNT_EXPIRE = "account_expire"
 CLEANUP_TASK_ACCOUNT_CLEANUP = "account_cleanup"
 CLEANUP_TASK_ACCOUNT_DELETE = "account_delete"
 
+BOOT_OPERATION_SESSION_PROVISION = "session_provision"
+BOOT_OPERATION_WATCHER_STATUS_QUERY = "watcher_status_query"
+BOOT_OPERATION_RESOURCE_DELETE = "resource_delete"
+BOOT_OPERATION_ACCOUNT_DELETE = "account_delete"
+
+BOOT_OPERATION_PENDING = "pending"
+BOOT_OPERATION_RUNNING = "running"
+BOOT_OPERATION_SUCCEEDED = "succeeded"
+BOOT_OPERATION_FAILED = "failed"
+
 TERMINAL_SESSION_STATES = {
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
     SESSION_STATE_CANCELLED,
+}
+
+ACTIVE_BOOT_OPERATION_STATES = {
+    BOOT_OPERATION_PENDING,
+    BOOT_OPERATION_RUNNING,
 }
 
 
@@ -173,6 +188,33 @@ class CleanupAdminActionRecord:
     assessment_reason: str = ""
 
 
+@dataclass
+class BootOperationRecord:
+    operation_id: str = ""
+    kind: str = ""
+    subject: str = ""
+    requester: str = ""
+    route: str = ""
+    state: str = BOOT_OPERATION_PENDING
+    idempotency_key: str = ""
+    payload: dict = field(default_factory=dict)
+    result: dict = field(default_factory=dict)
+    last_error: str = ""
+    attempt_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+    due_at: str = ""
+    claimed_at: str = ""
+    last_attempt_at: str = ""
+
+
+@dataclass(frozen=True)
+class BootOperationDueRecord:
+    operation_id: str = ""
+    kind: str = ""
+    due_at: str = ""
+
+
 class PlatformBaser(dbing.LMDBer):
     """LMDB database for the KF boot service."""
 
@@ -189,6 +231,8 @@ class PlatformBaser(dbing.LMDBer):
         self.cleanup_tasks = None
         self.cleanup_due = None
         self.cleanup_admin_actions = None
+        self.boot_operations = None
+        self.boot_operation_due = None
         super().__init__(
             name=name,
             headDirPath=headDirPath,
@@ -239,6 +283,16 @@ class PlatformBaser(dbing.LMDBer):
             db=self,
             subkey="cada.",
             klas=CleanupAdminActionRecord,
+        )
+        self.boot_operations = koming.Komer(
+            db=self,
+            subkey="bopr.",
+            klas=BootOperationRecord,
+        )
+        self.boot_operation_due = koming.Komer(
+            db=self,
+            subkey="bdue.",
+            klas=BootOperationDueRecord,
         )
         return self.env
 
