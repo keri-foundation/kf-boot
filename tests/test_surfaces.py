@@ -6,6 +6,7 @@ from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import eventing
 
 from kfboot.app import create_app
+from kfboot.onboarding import _clientIp
 
 from .support import (
     build_exn,
@@ -78,6 +79,12 @@ def test_public_discovery_stays_plain_json_and_reply_frames_prepend_boot_kel(con
         assert reply.ked["r"] == "/onboarding/session/start"
         assert reply.ked["i"] == contract.ctx.host_hab.pre
         assert reply.ked["a"]["session_id"].startswith("sess_")
+
+
+def test_client_ip_normalizes_hio_tuple_remote_addr():
+    assert _clientIp(("198.51.100.20", 49152)) == "198.51.100.20"
+    assert _clientIp("198.51.100.20") == "198.51.100.20"
+    assert _clientIp(None) == ""
 
 
 def test_health_reports_cleanup_runtime_failure_when_cleanup_should_be_running(contract_factory):
