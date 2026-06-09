@@ -5,8 +5,8 @@ from typing import Any
 
 from falcon import testing
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
+from keri.core import exchange
 from keri.core.serdering import SerderKERI
-from keri.peer import exchanging
 from kfboot.store import Store, makeRecord
 from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
 
@@ -314,8 +314,8 @@ def build_signed_serder(hab, serder: SerderKERI, *, end: bytes | bytearray = b""
 
 
 def build_exn(hab, *, route: str, payload: dict[str, Any]) -> bytes:
-    serder, end = exchanging.exchange(route=route, attributes=payload, sender=hab.pre)
-    return build_signed_serder(hab, serder, end=end)
+    serder = exchange(sender=hab.pre, route=route, attributes=payload)
+    return build_signed_serder(hab, serder)
 
 
 def split_cesr_message(ims: bytes | bytearray) -> tuple[bytes, bytes]:
