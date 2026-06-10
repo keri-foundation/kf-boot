@@ -8,7 +8,7 @@ import falcon
 from keri import help
 
 from kfboot.basing import QuotaRecord
-from kfboot.config import ACCOUNT_ROUTES, ONBOARDING_ROUTES
+from kfboot.config import ACCOUNT_ROUTES, ONBOARDING_QUOTA_ROUTES, ONBOARDING_ROUTES
 from kfboot.utils import extractExnPayload, optionalStr
 from kfboot.store import nowIso
 
@@ -27,8 +27,8 @@ class Limiter:
     def enforceOnboardingRequestQuota(self, *, route: str, client_ip: str) -> None:
         """Throttle onboarding business requests by client IP."""
 
-        # Make sure that it is effective only on the Onboarding routes
-        if route not in ONBOARDING_ROUTES:
+        # Polling operation status is not onboarding business work.
+        if route not in ONBOARDING_QUOTA_ROUTES:
             return
 
         # Get client IP

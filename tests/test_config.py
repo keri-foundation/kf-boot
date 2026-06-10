@@ -155,6 +155,7 @@ def test_config_from_env_parses_cleanup_settings(monkeypatch):
     monkeypatch.setenv("KF_BOOT_CLEANUP_FAILURE_BACKOFF_MAX_SECONDS", "300")
     monkeypatch.setenv("KF_BOOT_CLEANUP_FAILURE_JITTER_SECONDS", "2")
     monkeypatch.setenv("KF_BOOT_CLEANUP_BLOCK_AFTER_ATTEMPTS", "6")
+    monkeypatch.setenv("KF_BOOT_OPERATION_FAILURE_MAX_ATTEMPTS", "4")
     monkeypatch.setenv("KF_BOOT_CLEANUP_BLOCK_AFTER_FAILURE_AGE_SECONDS", "1800")
     monkeypatch.setenv("KF_BOOT_EXPIRED_ACCOUNT_RETENTION_SECONDS", "120")
 
@@ -170,6 +171,7 @@ def test_config_from_env_parses_cleanup_settings(monkeypatch):
     assert config.cleanup_failure_backoff_max_seconds == 300
     assert config.cleanup_failure_jitter_seconds == 2
     assert config.cleanup_block_after_attempts == 6
+    assert config.operation_failure_max_attempts == 4
     assert config.cleanup_block_after_failure_age_seconds == 1800
     assert config.expired_account_retention_seconds == 120
 

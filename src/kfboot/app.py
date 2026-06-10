@@ -12,7 +12,6 @@ from keri.core.eventing import Kevery
 from keri.core.kraming import Kramer
 from keri.kering import Vrsn_1_0
 
-from kfboot.boot_client import BootClient
 from kfboot.boot_exchanger import BootContext, BootExchanger
 from kfboot.config import Config
 from kfboot.onboarding import CesrSurfaceEnd
@@ -46,8 +45,8 @@ class StaticConfig:
 class Context:
     config: Config
     store: Store
-    witness_boots: dict[str, BootClient]
-    watcher_boot: BootClient
+    witness_boots: dict[str, Any]
+    watcher_boot: Any | None
     habery: Habery
     host_hab: Any
     kramer: Kramer | None
@@ -168,11 +167,8 @@ def create_app(config: Config | None = None, *, temp: bool = False) -> tuple[fal
     ctx = Context(
         config=config,
         store=store,
-        witness_boots={
-            backend.id: BootClient(backend.boot_url, timeout=config.boot_api_timeout_seconds)
-            for backend in config.witness_backends
-        },
-        watcher_boot=BootClient(config.wat_boot_url, timeout=config.boot_api_timeout_seconds),
+        witness_boots={},
+        watcher_boot=None,
         habery=hby,
         host_hab=host_hab,
         kramer=None,

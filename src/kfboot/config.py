@@ -34,6 +34,15 @@ def _normalize_url(value: str) -> str:
 
 
 ONBOARDING_ROUTES = {
+    "/operations/status",
+    "/onboarding/session/start",
+    "/onboarding/session/status",
+    "/onboarding/account/create",
+    "/onboarding/complete",
+    "/onboarding/cancel",
+}
+
+ONBOARDING_QUOTA_ROUTES = {
     "/onboarding/session/start",
     "/onboarding/session/status",
     "/onboarding/account/create",
@@ -42,6 +51,7 @@ ONBOARDING_ROUTES = {
 }
 
 ACCOUNT_ROUTES = {
+    "/operations/status",
     "/account/witnesses",
     "/account/watchers",
     "/account/watchers/status",
@@ -260,6 +270,8 @@ class Config:
     cleanup_failure_jitter_seconds: float = 5.0
     # Block a poisoned cleanup task once it has failed this many times
     cleanup_block_after_attempts: int = 10
+    # Max attempts before an async boot operation is failed permanently
+    operation_failure_max_attempts: int = 10
     # Block a poisoned cleanup task once it has been failing this long
     cleanup_block_after_failure_age_seconds: float = 86400.0
     # Retention delay after account cleanup before final account deletion is allowed
@@ -293,6 +305,8 @@ class Config:
             raise ValueError("cleanup_failure_jitter_seconds must be greater than or equal to 0.")
         if self.cleanup_block_after_attempts <= 0:
             raise ValueError("cleanup_block_after_attempts must be greater than 0.")
+        if self.operation_failure_max_attempts <= 0:
+            raise ValueError("operation_failure_max_attempts must be greater than 0.")
         if self.cleanup_block_after_failure_age_seconds <= 0:
             raise ValueError("cleanup_block_after_failure_age_seconds must be greater than 0.")
         if self.expired_account_retention_seconds < 0:
@@ -400,6 +414,7 @@ class Config:
             f"Cleanup failure backoff max seconds: {self.cleanup_failure_backoff_max_seconds}\n"
             f"Cleanup failure jitter seconds: {self.cleanup_failure_jitter_seconds}\n"
             f"Cleanup block after attempts: {self.cleanup_block_after_attempts}\n"
+            f"Operation failure max attempts: {self.operation_failure_max_attempts}\n"
             f"Cleanup block after failure age seconds: {self.cleanup_block_after_failure_age_seconds}\n"
             f"Expired account retention seconds: {self.expired_account_retention_seconds}\n"
         )
@@ -522,6 +537,9 @@ class Config:
             ),
             cleanup_block_after_attempts=int(
                 _env("CLEANUP_BLOCK_AFTER_ATTEMPTS", "10")
+            ),
+            operation_failure_max_attempts=int(
+                _env("OPERATION_FAILURE_MAX_ATTEMPTS", "10")
             ),
             cleanup_block_after_failure_age_seconds=float(
                 _env("CLEANUP_BLOCK_AFTER_FAILURE_AGE_SECONDS", "86400")

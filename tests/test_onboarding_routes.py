@@ -12,16 +12,23 @@ from kfboot.basing import (
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_EXPIRED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
+    BOOT_OPERATION_FAILED,
+    BOOT_OPERATION_PENDING,
+    BOOT_OPERATION_SESSION_PROVISION,
+    BOOT_OPERATION_SUCCEEDED,
+    CLEANUP_TASK_SESSION_CLEANUP,
     SESSION_STATE_ACCOUNT_CREATED,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
+    SESSION_STATE_STARTED,
     SESSION_STATE_WITNESS_POOL_ALLOCATED,
 )
 from kfboot.boot_client import BootError
 from kfboot.config import AccountProfile
 from kfboot.limiting import Limiter
+from kfboot.operating import BootOperationDoer, BootOperationProcessor
 from .support import (
     FakeWatcherBoot,
     account_create_payload,
@@ -30,15 +37,16 @@ from .support import (
     build_exn,
     complete_session,
     create_account,
+    drain_do,
     freeze_boot_time,
     make_witness_backends,
     post_cesr,
     register_aid,
+    run_boot_operations,
     start_payload,
     start_session,
     sweep_do,
     total_witness_create_calls,
-    total_witness_created_eids,
     total_witness_delete_calls,
     make_config,
 )
@@ -79,6 +87,7 @@ def test_onboarding_flow_persists_state_transitions_and_bound_resources(contract
         )
         _, status_reply = assert_reply_frame(contract, status_response, route="/onboarding/session/status")
         assert status_reply.ked["a"]["state"] == SESSION_STATE_WITNESS_POOL_ALLOCATED
+        assert status_reply.ked["a"]["session_provision_operation"]["state"] == BOOT_OPERATION_SUCCEEDED
         assert "boot_url" in status_reply.ked["a"]["witnesses"][0]
         assert "boot_url" in status_reply.ked["a"]["watcher"]
 
@@ -108,6 +117,88 @@ def test_onboarding_flow_persists_state_transitions_and_bound_resources(contract
         assert session.state == SESSION_STATE_COMPLETED
         assert account_record.status == ACCOUNT_STATE_ONBOARDED
         assert account_record.onboarded_at
+
+
+def test_session_start_returns_pending_operation_before_downstream_allocation(contract):
+    with (
+        habbing.openHab(name="async-start-ephemeral", temp=True, transferable=False) as (_, ephemeral),
+        habbing.openHab(name="async-start-account", temp=True) as (_, account),
+    ):
+        register_aid(contract, "/onboarding", ephemeral)
+        _, _, start_reply = start_session(
+            contract,
+            ephemeral,
+            account_aid=account.pre,
+            drain_operations=False,
+        )
+        session_id = start_reply.ked["a"]["session_id"]
+        operation = start_reply.ked["a"]["session_provision_operation"]
+
+        assert start_reply.ked["a"]["witnesses"] == []
+        assert start_reply.ked["a"]["watcher"] is None
+        assert operation["kind"] == BOOT_OPERATION_SESSION_PROVISION
+        assert operation["state"] == BOOT_OPERATION_PENDING
+
+        blocked = post_cesr(
+            contract,
+            "/onboarding",
+            build_exn(
+                ephemeral,
+                route="/onboarding/account/create",
+                payload={"session_id": session_id, "account_aid": account.pre},
+            ),
+        )
+        assert blocked.status_code == 409
+        assert blocked.json["title"] == "Session provisioning pending"
+
+        run_boot_operations(contract)
+        _, _, create_reply = create_account(contract, ephemeral, start_reply, account_aid=account.pre)
+
+        updated = contract.ctx.store.getBootOperation(operation["operation_id"])
+        assert updated.state == BOOT_OPERATION_SUCCEEDED
+        assert create_reply.ked["a"]["account"]["account_aid"] == account.pre
+
+
+def test_in_flight_provisioning_does_not_resurrect_cancelled_session(contract):
+    with habbing.openHab(name="cancel-during-provisioning", temp=True, transferable=False) as (_, ephemeral):
+        register_aid(contract, "/onboarding", ephemeral)
+        _, _, start_reply = start_session(contract, ephemeral, drain_operations=False)
+        session_id = start_reply.ked["a"]["session_id"]
+        operation = contract.ctx.store.listBootOperations(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session_id,
+        )[0]
+        doer = BootOperationDoer(
+            store=contract.ctx.store,
+            witness_boots=contract.ctx.witness_boots,
+            watcher_boot=contract.ctx.watcher_boot,
+            processor=BootOperationProcessor(provisioner=contract.ctx.exchanger.provisioner),
+            batch_size=100,
+        )
+        provisioning = doer.processDueDo(tymth=lambda: 0.0, tock=0.0)
+        next(provisioning)
+
+        cancel = post_cesr(
+            contract,
+            "/onboarding",
+            build_exn(ephemeral, route="/onboarding/cancel", payload={"session_id": session_id}),
+        )
+        assert cancel.status_code == 200
+        assert contract.ctx.store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session_id) is not None
+
+        drain_do(provisioning)
+
+        cancelled = contract.ctx.store.getSession(session_id)
+        updated_operation = contract.ctx.store.getBootOperation(operation.operation_id)
+        assert cancelled.state == SESSION_STATE_CANCELLED
+        assert cancelled.resources_cleaned_at == ""
+        assert updated_operation.state == BOOT_OPERATION_FAILED
+        assert updated_operation.last_error == "The onboarding session was cancelled."
+        assert updated_operation.result == {"status_code": 409}
+        assert contract.ctx.store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session_id) is not None
+        assert contract.ctx.store.countResources("witness") == 1
+        assert contract.ctx.store.countResources("watcher") == 0
+        assert contract.ctx.watcher_boot.create_calls == 0
 
 
 def test_session_status_rejects_expired_session_without_refreshing_lease(contract):
@@ -304,6 +395,7 @@ def test_session_start_marks_past_due_session_expired_and_blocks_until_cleanup_f
         _, retry_reply = assert_reply_frame(contract, second_retry, route="/onboarding/session/start")
         assert second_retry.status_code == 200
         assert retry_reply.ked["a"]["session_id"] != first_session_id
+        run_boot_operations(contract)
         assert total_witness_create_calls(contract.ctx) == 2
         assert contract.ctx.watcher_boot.create_calls == 2
 
@@ -454,7 +546,7 @@ def test_session_status_refreshes_session_lease(contract):
         assert refreshed.expires_at != "2099-01-01T00:00:00+00:00"
 
 
-def test_partial_downstream_failure_cleans_resources_and_allows_fresh_retry(contract_factory):
+def test_partial_downstream_failure_stays_visible_on_operation(contract_factory):
     contract = contract_factory(
         watcher_boot=FakeWatcherBoot(create_error=boot_error(503, "simulated watcher failure"))
     )
@@ -471,37 +563,37 @@ def test_partial_downstream_failure_cleans_resources_and_allows_fresh_retry(cont
                 payload=start_payload(chosen_profile_code="3-of-4"),
             ),
         )
-        assert response.status_code == 503
+        assert response.status_code == 200
+        _, start_reply = assert_reply_frame(contract, response, route="/onboarding/session/start")
+        session_id = start_reply.ked["a"]["session_id"]
 
+        run_boot_operations(contract)
         session = contract.ctx.store.findSessionForEphemeral(ephemeral.pre)
-        assert session.state == SESSION_STATE_FAILED
-        assert session.witness_eids == []
+        operation = contract.ctx.store.listBootOperations(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session_id,
+        )[0]
+        assert operation.state == BOOT_OPERATION_PENDING
+        assert operation.last_error == "simulated watcher failure"
+        assert session.state == SESSION_STATE_WITNESS_POOL_ALLOCATED
+        assert len(session.witness_eids) == 4
         assert session.watcher_eid == ""
         assert total_witness_create_calls(contract.ctx) == 4
         assert contract.ctx.watcher_boot.create_calls == 1
-        assert contract.ctx.store.countResources("witness") == 0
+        assert contract.ctx.store.countResources("witness") == 4
         assert contract.ctx.store.countResources("watcher") == 0
-        assert sorted(total_witness_delete_calls(contract.ctx)) == sorted(total_witness_created_eids(contract.ctx))
 
-        retry = post_cesr(
+        account_create = post_cesr(
             contract,
             "/onboarding",
             build_exn(
                 ephemeral,
-                route="/onboarding/session/start",
-                payload=start_payload(chosen_profile_code="3-of-4"),
+                route="/onboarding/account/create",
+                payload={"session_id": session_id, "account_aid": session.account_aid},
             ),
         )
-        # Cleanup already succeeded for the failed session, so the next start
-        # is allowed to attempt a brand-new allocation instead of being blocked
-        # behind stale cleanup debt. The downstream watcher still fails, but the
-        # retry should not leak resources from either attempt.
-        assert retry.status_code == 503
-        assert total_witness_create_calls(contract.ctx) == 8
-        assert contract.ctx.watcher_boot.create_calls == 2
-        assert contract.ctx.store.countResources("witness") == 0
-        assert contract.ctx.store.countResources("watcher") == 0
-        assert sorted(total_witness_delete_calls(contract.ctx)) == sorted(total_witness_created_eids(contract.ctx))
+        assert account_create.status_code == 409
+        assert account_create.json["title"] == "Session provisioning pending"
 
 
 def test_failed_session_teardown_is_retried_by_cleanup_tasks(contract_factory, monkeypatch):
@@ -526,9 +618,9 @@ def test_failed_session_teardown_is_retried_by_cleanup_tasks(contract_factory, m
         account_record = contract.ctx.store.getAccount(account.pre)
         attempts: list[str] = []
 
-        # Create a fake failed teardown where the 1st attempt fails
-        def flaky_teardown(*, session: Any, account=None) -> None:
+        def flaky_teardown_do(*, session: Any, account=None, tymth, tock: float = 0.0):
             attempts.append(session.session_id)
+            yield tock
             if len(attempts) == 1:
                 raise BootError("simulated cleanup failure", status_code=502)
             contract.ctx.store.deleteResource("witness", witness_id)
@@ -539,12 +631,6 @@ def test_failed_session_teardown_is_retried_by_cleanup_tasks(contract_factory, m
                 account.witness_eids = []
                 account.watcher_eid = ""
                 account.session_id = ""
-
-        monkeypatch.setattr(contract.ctx.exchanger.provisioner, "teardownSessionResources", flaky_teardown)
-
-        def flaky_teardown_do(*, session: Any, account=None, tymth, tock: float = 0.0):
-            yield tock
-            flaky_teardown(session=session, account=account)
 
         monkeypatch.setattr(contract.ctx.exchanger.provisioner, "teardownSessionResourcesDo", flaky_teardown_do)
 
@@ -562,10 +648,19 @@ def test_failed_session_teardown_is_retried_by_cleanup_tasks(contract_factory, m
         assert failed.state == SESSION_STATE_FAILED
         assert failed.resources_cleaned_at == ""
 
-        # Run the cleanup
-        cleaned = sweep_do(
+        # The first teardown attempt now happens in the cleanup worker.
+        failed_cleanup = sweep_do(
             contract.ctx.exchanger.expirer,
             now="2099-01-01T00:00:00+00:00",
+            batch_size=1,
+        )
+        task = contract.ctx.store.getCleanupTask("session_cleanup", session_id)
+        assert failed_cleanup["sessions_cleaned"] == 0
+        assert task.due_at == "2099-01-01T00:01:00+00:00"
+
+        cleaned = sweep_do(
+            contract.ctx.exchanger.expirer,
+            now="2099-01-01T00:01:00+00:00",
             batch_size=1,
         )
 
@@ -574,10 +669,10 @@ def test_failed_session_teardown_is_retried_by_cleanup_tasks(contract_factory, m
         failed_account = contract.ctx.store.getAccount(account.pre)
         assert cleaned["sessions_cleaned"] == 1
         assert recovered is not None
-        assert recovered.resources_cleaned_at == "2099-01-01T00:00:00+00:00"
+        assert recovered.resources_cleaned_at == "2099-01-01T00:01:00+00:00"
         assert failed_account is not None
         assert failed_account.status == ACCOUNT_STATE_FAILED
-        assert failed_account.resources_cleaned_at == "2099-01-01T00:00:00+00:00"
+        assert failed_account.resources_cleaned_at == "2099-01-01T00:01:00+00:00"
         assert failed_account.session_id == ""
         assert contract.ctx.store.getResource("witness", witness_id) is None
         assert contract.ctx.store.getResource("watcher", watcher_id) is None
@@ -739,9 +834,16 @@ def test_session_start_enforces_witness_capacity(contract_factory):
             build_exn(ephemeral, route="/onboarding/session/start", payload=start_payload()),
         )
 
-    assert response.status_code == 409
+    assert response.status_code == 200
+    run_boot_operations(contract)
     session = contract.ctx.store.findSessionForEphemeral(ephemeral.pre)
-    assert session.state == SESSION_STATE_FAILED
+    operation = contract.ctx.store.listBootOperations(
+        kind=BOOT_OPERATION_SESSION_PROVISION,
+        subject=session.session_id,
+    )[0]
+    assert operation.state == BOOT_OPERATION_FAILED
+    assert "witness limit is 0" in operation.last_error
+    assert session.state == SESSION_STATE_STARTED
     assert session.witness_eids == []
     assert session.watcher_eid == ""
     assert contract.ctx.store.countResources("witness") == 0
@@ -757,25 +859,33 @@ def test_session_start_enforces_watcher_capacity_without_duplicate_witnesses(con
             "/onboarding",
             build_exn(ephemeral, route="/onboarding/session/start", payload=start_payload()),
         )
-        assert response.status_code == 409
+        assert response.status_code == 200
 
+        run_boot_operations(contract)
         session = contract.ctx.store.findSessionForEphemeral(ephemeral.pre)
-        assert session.state == SESSION_STATE_FAILED
-        assert session.witness_eids == []
+        operation = contract.ctx.store.listBootOperations(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session.session_id,
+        )[0]
+        assert operation.state == BOOT_OPERATION_FAILED
+        assert "watcher limit is 0" in operation.last_error
+        assert session.state == SESSION_STATE_WITNESS_POOL_ALLOCATED
+        assert len(session.witness_eids) == 1
         assert session.watcher_eid == ""
-        assert contract.ctx.store.countResources("witness") == 0
+        assert contract.ctx.store.countResources("witness") == 1
         assert contract.ctx.store.countResources("watcher") == 0
-        assert len(total_witness_delete_calls(contract.ctx)) == 1
+        assert len(total_witness_delete_calls(contract.ctx)) == 0
 
         retry = post_cesr(
             contract,
             "/onboarding",
             build_exn(ephemeral, route="/onboarding/session/start", payload=start_payload()),
         )
-        assert retry.status_code == 409
-        assert total_witness_create_calls(contract.ctx) == 2
+        assert retry.status_code == 200
+        run_boot_operations(contract)
+        assert total_witness_create_calls(contract.ctx) == 1
         assert contract.ctx.watcher_boot.create_calls == 0
-        assert contract.ctx.store.countResources("witness") == 0
+        assert contract.ctx.store.countResources("witness") == 1
         assert contract.ctx.store.countResources("watcher") == 0
 
 
@@ -1206,6 +1316,13 @@ def test_onboarding_request_quota_blocks_client_ip_for_configured_period(contrac
     # Assert it was unblocked
     assert unblocked.status_code == 200
 
+
+def test_boot_exchanger_normalizes_tuple_client_ip(contract):
+    contract.ctx.exchanger.setClientIp(("127.0.0.1", 12345))
+
+    assert contract.ctx.exchanger.client_ip == "127.0.0.1"
+
+
 def test_onboarding_request_quota_survives_store_reopen(tmp_path):
     config = make_config(
         tmp_path,
@@ -1545,8 +1662,8 @@ def test_account_create_marks_sessionFailed_when_resources_are_incomplete(contra
         assert response.status_code == 409
         assert response.json["title"] == "Resources missing"
         saved = contract.ctx.store.getSession(session.session_id)
-        assert saved.state == SESSION_STATE_FAILED
-        assert "Hosted resources were not fully allocated" in saved.failure_reason
+        assert saved.state == SESSION_STATE_STARTED
+        assert saved.failure_reason == ""
 
 
 def test_account_create_rejects_account_bound_to_other_session(contract):
@@ -1703,11 +1820,20 @@ def test_complete_rejects_missing_watcher_and_wrong_principal(pending_account_bu
         session = contract.ctx.store.getSession(session_id)
         account_record = contract.ctx.store.getAccount(account.pre)
         assert session.state == SESSION_STATE_FAILED
-        assert session.witness_eids == []
+        assert len(session.witness_eids) == 1
         assert session.watcher_eid == ""
         assert account_record.status == ACCOUNT_STATE_FAILED
-        assert account_record.witness_eids == []
+        assert len(account_record.witness_eids) == 1
         assert account_record.watcher_eid == ""
+        assert total_witness_delete_calls(contract.ctx) == []
+        assert contract.ctx.store.countResources("witness") == 1
+        assert contract.ctx.store.countResources("watcher") == 1
+
+        sweep_do(
+            contract.ctx.exchanger.expirer,
+            now="2099-01-01T00:00:00+00:00",
+            batch_size=1,
+        )
         assert sorted(total_witness_delete_calls(contract.ctx)) == sorted(pending_account_bundle["witness_ids"])
         assert contract.ctx.store.countResources("witness") == 0
         assert contract.ctx.store.countResources("watcher") == 0
@@ -1749,18 +1875,34 @@ def test_cancel_marks_session_cancelled_is_idempotent_and_fails_pending_account(
         session = contract.ctx.store.getSession(session_id)
         account_record = contract.ctx.store.getAccount(account.pre)
         assert session.state == SESSION_STATE_CANCELLED
-        assert session.witness_eids == []
-        assert session.watcher_eid == ""
+        assert session.resources_cleaned_at == ""
+        assert len(session.witness_eids) == 1
+        assert session.watcher_eid == "WAT_1"
         assert account_record.status == ACCOUNT_STATE_FAILED
-        assert account_record.witness_eids == []
-        assert account_record.watcher_eid == ""
+        assert account_record.resources_cleaned_at == ""
+        assert len(account_record.witness_eids) == 1
+        assert account_record.watcher_eid == "WAT_1"
+        assert contract.ctx.store.countResources("witness") == 1
+        assert contract.ctx.store.countResources("watcher") == 1
+        assert total_witness_delete_calls(contract.ctx) == []
+        assert contract.ctx.watcher_boot.delete_calls == []
+
+        sweep_do(
+            contract.ctx.exchanger.expirer,
+            now="2099-01-01T00:00:00+00:00",
+            batch_size=1,
+        )
+        cleaned_session = contract.ctx.store.getSession(session_id)
+        cleaned_account = contract.ctx.store.getAccount(account.pre)
+        assert cleaned_session.resources_cleaned_at == "2099-01-01T00:00:00+00:00"
+        assert cleaned_account.resources_cleaned_at == "2099-01-01T00:00:00+00:00"
         assert contract.ctx.store.countResources("witness") == 0
         assert contract.ctx.store.countResources("watcher") == 0
         assert len(total_witness_delete_calls(contract.ctx)) == 1
         assert contract.ctx.watcher_boot.delete_calls == ["WAT_1"]
 
 
-def test_cancel_returns_error_when_teardown_fails_and_leaves_session_retryable(contract_factory):
+def test_cancel_does_not_call_remote_teardown(contract_factory):
     contract = contract_factory()
 
     with (
@@ -1788,20 +1930,21 @@ def test_cancel_returns_error_when_teardown_fails_and_leaves_session_retryable(c
             ),
         )
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     session = contract.ctx.store.getSession(session_id)
     account_record = contract.ctx.store.getAccount(account.pre)
-    assert session.state == SESSION_STATE_FAILED
-    assert "teardown failed during cancellation" in session.failure_reason.lower()
+    assert session.state == SESSION_STATE_CANCELLED
+    assert session.resources_cleaned_at == ""
     assert len(session.witness_eids) == 1
-    assert session.watcher_eid == ""
+    assert session.watcher_eid == "WAT_1"
     assert account_record.status == ACCOUNT_STATE_FAILED
+    assert account_record.resources_cleaned_at == ""
     assert len(account_record.witness_eids) == 1
-    assert account_record.watcher_eid == ""
+    assert account_record.watcher_eid == "WAT_1"
     assert contract.ctx.store.countResources("witness") == 1
-    assert contract.ctx.store.countResources("watcher") == 0
-    assert contract.ctx.watcher_boot.delete_calls == ["WAT_1"]
-    assert len(total_witness_delete_calls(contract.ctx)) == 1
+    assert contract.ctx.store.countResources("watcher") == 1
+    assert contract.ctx.watcher_boot.delete_calls == []
+    assert total_witness_delete_calls(contract.ctx) == []
 
 
 def test_cancel_rejects_wrong_principal_and_completed_session(contract):

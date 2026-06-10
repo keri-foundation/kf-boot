@@ -102,12 +102,12 @@ def test_health_reports_cleanup_runtime_failure_when_cleanup_should_be_running(c
     assert health.json["cleanup"]["reasons"] == ["runner_not_running"]
 
 
-def test_create_app_applies_boot_api_timeout_to_real_boot_clients(tmp_path):
+def test_create_app_does_not_construct_sync_boot_clients(tmp_path):
     config = make_config(tmp_path, boot_api_timeout_seconds=7, cleanup_interval_seconds=0)
     _app, ctx = create_app(config=config, temp=True)
     try:
-        assert all(client.timeout == 7 for client in ctx.witness_boots.values())
-        assert ctx.watcher_boot.timeout == 7
+        assert ctx.witness_boots == {}
+        assert ctx.watcher_boot is None
     finally:
         ctx.close(clear=True)
 

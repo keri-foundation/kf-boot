@@ -8,6 +8,8 @@ from typing import Any
 from keri import help
 
 from kfboot.basing import (
+    SESSION_STATE_CANCELLED,
+    SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
     SESSION_STATE_WITNESS_POOL_ALLOCATED,
     TERMINAL_SESSION_STATES,
@@ -20,8 +22,6 @@ from kfboot.store import (
     nowIso,
     parsePublicUrl,
 )
-
-from kfboot.utils import bootErrorToHTTP
 
 logger = help.ogler.getLogger(__name__)
 
@@ -37,110 +37,187 @@ class Provisioner:
         self.cleanup_witness_boots = witness_boots
         self.cleanup_watcher_boot = watcher_boot
 
-    def provisionSessionResources(self, *, session: SessionRecord) -> None:
-        if session.state in TERMINAL_SESSION_STATES:
-            if session.state == SESSION_STATE_FAILED:
-                logger.warning(
-                    "Session in failed state during resource provisioning"
-                )
-                raise falcon.HTTPConflict(
-                    title="Session failed",
-                    description=session.failure_reason or "The onboarding session is in a failed state.",
-                )
+    def provisionSessionResourcesDo(
+        self,
+        *,
+        session: SessionRecord,
+        witness_boots,
+        watcher_boot,
+        operation_id: str,
+        tymth,
+        tock: float = 0.0,
+    ):
+        session = self.ctx.store.getSession(session.session_id) or session
+        terminal = self._terminalProvisionResult(session)
+        if terminal is not None:
+            return terminal
+
+        missing_witnesses = max(session.witness_count - len(session.witness_eids), 0)
+        if missing_witnesses:
             logger.info(
-                f"Session in terminal state {session.state} during resource provisioning"
+                f"Witness(es) requested for session {session.session_id}"
+                f" with {missing_witnesses} missing witness(es)"
             )
-            return
-
-        try:
-            missing_witnesses = max(session.witness_count - len(session.witness_eids), 0)
-            if missing_witnesses:
+            self._ensureCapacity(kind="witness", requested=missing_witnesses)
+            planned_backends = self._plannedWitnessBackends(session=session)
+            start_index = len(session.witness_eids)
+            for index, backend in enumerate(planned_backends[start_index:], start=start_index):
                 logger.info(
-                    f"Witness(es) requested for session {session.session_id}"
-                    f" with {missing_witnesses} missing witness(es)"
+                    f"Witness allocation start for session {session.session_id}"
                 )
-                self._ensureCapacity(kind="witness", requested=missing_witnesses)
-                planned_backends = self._plannedWitnessBackends(session=session)
-                start_index = len(session.witness_eids)
-                for index, backend in enumerate(planned_backends[start_index:], start=start_index):
-                    logger.info(
-                        f"Witness allocation start for session {session.session_id}"
-                    )
-                    created = self._witnessClient(backend.id).allocateWitness(session.account_aid)
-                    record = makeRecord(
-                        kind="witness",
-                        eid=str(created.get("eid", "")),
-                        backend_id=backend.id,
-                        cid="",
-                        principal="",
-                        session_id=session.session_id,
-                        name=str(created.get("name", "") or f"witness-{index + 1}"),
-                        identifier_alias=session.account_alias,
-                        region_id=session.region_id,
-                        region_name=session.region_name,
-                        public_url=backend.public_url,
-                        boot_url=backend.boot_url,
-                        oobis=list(created.get("oobis", []) or []),
-                        status=str(created.get("status", "") or "allocated"),
-                    )
-                    self.ctx.store.addResource(record)
-                    session.witness_eids.append(record.eid)
-                    session.updated_at = nowIso()
-                    self.ctx.store.saveSession(session)
-                    logger.info(
-                        f"Witness allocated for session {session.session_id}: witness {record.eid}"
-                    )
-
-                session.state = SESSION_STATE_WITNESS_POOL_ALLOCATED
-                session.updated_at = nowIso()
-                self.ctx.store.saveSession(session)
-                logger.info(
-                    f"Witness pool allocated for session {session.session_id}: witness EIDs {session.witness_eids}"
+                client = self._witnessClient(backend.id, witness_boots=witness_boots)
+                created = yield from client.allocateWitnessDo(
+                    session.account_aid,
+                    idempotency_key=f"{operation_id}:witness:{backend.id}:{index}",
+                    tymth=tymth,
+                    tock=tock,
                 )
-
-            if session.watcher_required and not session.watcher_eid:
-                logger.info(
-                    f"Watcher requested for session {session.session_id}"
-                )
-                self._ensureCapacity(kind="watcher", requested=1)
-                first_witness = self.ctx.store.getResource("witness", session.witness_eids[0])
-                oobi = first_witness.oobis[0] if first_witness and first_witness.oobis else None
-                logger.info(
-                    f"Watcher allocation start for session {session.session_id}"
-                )
-                created = self.ctx.watcher_boot.allocateWatcher(session.account_aid, oobi=oobi)
+                current = self.ctx.store.getSession(session.session_id)
+                if current is not None:
+                    session = current
                 record = makeRecord(
-                    kind="watcher",
+                    kind="witness",
                     eid=str(created.get("eid", "")),
+                    backend_id=backend.id,
                     cid="",
                     principal="",
                     session_id=session.session_id,
-                    name=str(created.get("name", "") or "watcher"),
+                    name=str(created.get("name", "") or f"witness-{index + 1}"),
                     identifier_alias=session.account_alias,
                     region_id=session.region_id,
                     region_name=session.region_name,
-                    public_url=self.ctx.config.wat_public_url,
-                    boot_url=self.ctx.watcher_boot.base_url,
+                    public_url=backend.public_url,
+                    boot_url=backend.boot_url,
                     oobis=list(created.get("oobis", []) or []),
-                    status=str(created.get("status", "") or "created"),
+                    status=str(created.get("status", "") or "allocated"),
                 )
                 self.ctx.store.addResource(record)
-                session.watcher_eid = record.eid
+                terminal = self._terminalProvisionResult(session, cleanup_debt_added=True)
+                if terminal is not None:
+                    return terminal
+                if record.eid not in session.witness_eids:
+                    session.witness_eids.append(record.eid)
                 session.updated_at = nowIso()
                 self.ctx.store.saveSession(session)
                 logger.info(
-                    f"Watcher allocated for session {session.session_id}: watcher {record.eid}"
+                    f"Witness allocated for session {session.session_id}: witness {record.eid}"
                 )
-        except BootError as exc:
+
+            session = self.ctx.store.getSession(session.session_id) or session
+            terminal = self._terminalProvisionResult(session)
+            if terminal is not None:
+                return terminal
+            session.state = SESSION_STATE_WITNESS_POOL_ALLOCATED
+            session.updated_at = nowIso()
+            self.ctx.store.saveSession(session)
+            logger.info(
+                f"Witness pool allocated for session {session.session_id}: witness EIDs {session.witness_eids}"
+            )
+
+        session = self.ctx.store.getSession(session.session_id) or session
+        terminal = self._terminalProvisionResult(session)
+        if terminal is not None:
+            return terminal
+        if session.watcher_required and not session.watcher_eid:
+            logger.info(
+                f"Watcher requested for session {session.session_id}"
+            )
+            self._ensureCapacity(kind="watcher", requested=1)
+            first_witness = self.ctx.store.getResource("witness", session.witness_eids[0])
+            oobi = first_witness.oobis[0] if first_witness and first_witness.oobis else None
+            logger.info(
+                f"Watcher allocation start for session {session.session_id}"
+            )
+            created = yield from watcher_boot.allocateWatcherDo(
+                session.account_aid,
+                oobi=oobi,
+                idempotency_key=f"{operation_id}:watcher",
+                tymth=tymth,
+                tock=tock,
+            )
+            current = self.ctx.store.getSession(session.session_id)
+            if current is not None:
+                session = current
+            record = makeRecord(
+                kind="watcher",
+                eid=str(created.get("eid", "")),
+                cid="",
+                principal="",
+                session_id=session.session_id,
+                name=str(created.get("name", "") or "watcher"),
+                identifier_alias=session.account_alias,
+                region_id=session.region_id,
+                region_name=session.region_name,
+                public_url=self.ctx.config.wat_public_url,
+                boot_url=getattr(watcher_boot, "base_url", self.ctx.config.wat_boot_url),
+                oobis=list(created.get("oobis", []) or []),
+                status=str(created.get("status", "") or "created"),
+            )
+            self.ctx.store.addResource(record)
+            terminal = self._terminalProvisionResult(session, cleanup_debt_added=True)
+            if terminal is not None:
+                return terminal
+            session.watcher_eid = record.eid
+            session.updated_at = nowIso()
+            self.ctx.store.saveSession(session)
+            logger.info(
+                f"Watcher allocated for session {session.session_id}: watcher {record.eid}"
+            )
+
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "witness_eids": list(session.witness_eids),
+            "watcher_eid": session.watcher_eid,
+        }
+
+    def _terminalProvisionResult(
+        self,
+        session: SessionRecord,
+        *,
+        cleanup_debt_added: bool = False,
+    ) -> dict[str, Any] | None:
+        if session.state not in TERMINAL_SESSION_STATES:
+            return None
+
+        if cleanup_debt_added and session.resources_cleaned_at:
+            session.resources_cleaned_at = ""
+            session.updated_at = nowIso()
+            self.ctx.store.saveSession(session)
+
+        if session.state == SESSION_STATE_FAILED:
             logger.warning(
-                f"Boot API error during session resource provisioning: {exc}"
+                "Session in failed state during resource provisioning"
             )
-            raise bootErrorToHTTP(exc)
-        except Exception as exc:
-            logger.exception(
-                f"Unexpected error during session resource provisioning: {exc}"
+            raise BootError(
+                session.failure_reason or "The onboarding session is in a failed state.",
+                status_code=409,
             )
-            raise
+        if session.state == SESSION_STATE_CANCELLED:
+            logger.warning(
+                "Session cancelled during resource provisioning"
+            )
+            raise BootError(
+                "The onboarding session was cancelled.",
+                status_code=409,
+            )
+        if session.state == SESSION_STATE_EXPIRED:
+            logger.warning(
+                "Session expired during resource provisioning"
+            )
+            raise BootError(
+                "The onboarding session has expired.",
+                status_code=410,
+            )
+        logger.info(
+            f"Session in terminal state {session.state} during resource provisioning"
+        )
+        return {
+            "session_id": session.session_id,
+            "state": session.state,
+            "witness_eids": list(session.witness_eids),
+            "watcher_eid": session.watcher_eid,
+        }
 
     def _ensureCapacity(self, *, kind: str, requested: int) -> None:
         if requested <= 0:
@@ -273,24 +350,14 @@ class Provisioner:
             status_code=503,
         )
 
-    def teardownSessionResources(self, *, session: SessionRecord, account=None) -> None:
-        operations = self._sessionResourceDeleteOps(session=session, account=account)
-        logger.info(
-            f"Session resource teardown started for session {session.session_id}"
-        )
-
-        # Delete each hosted resource, preserving per-resource logging and aggregate retry behavior.
-        self._deleteHostedResourceOps(
-            operations,
-            session=session,
-            account=account,
-            context=f"session {session.session_id} teardown",
-        )
-        logger.info(
-            f"Session resources teardown completed for session {session.session_id}"
-        )
-
-    def teardownSessionResourcesDo(self, *, session: SessionRecord, account=None, tymth, tock: float = 0.0):
+    def teardownSessionResourcesDo(
+        self,
+        *,
+        session: SessionRecord,
+        account=None,
+        tymth,
+        tock: float = 0.0,
+    ):
         operations = self._sessionResourceDeleteOps(session=session, account=account)
         logger.info(
             f"Session resource teardown started for session {session.session_id}"
@@ -309,37 +376,14 @@ class Provisioner:
             f"Session resources teardown completed for session {session.session_id}"
         )
 
-    def teardownAccountResources(self, *, account_aid: str, account=None) -> None:
-        """Teardown account resources (Witnesses and Watchers) without deleting the account.
-        It gets triggered when an account is marked as 'expired'
-        """
-        sessions = self.ctx.store.listSessionsForAccount(account_aid)
-        operations = self._accountResourceDeleteOps(
-            account_aid=account_aid,
-            account=account,
-            sessions=sessions,
-        )
-        logger.info(
-            f"Resources teardown started for account AID {account_aid}"
-        )
-
-        # Delete account resources while collecting every BootError before retrying.
-        self._deleteHostedResourceOps(
-            operations,
-            account=account,
-            context=f"account {account_aid} resource teardown",
-        )
-
-        # Clear account bindings
-        if account is not None:
-            account.watcher_eid = ""
-            account.witness_eids = []
-            account.session_id = ""
-            self.ctx.store.saveAccount(account)
-
-        logger.info(f"Resources teardown completed for account AID {account_aid}")
-
-    def teardownAccountResourcesDo(self, *, account_aid: str, account=None, tymth, tock: float = 0.0):
+    def teardownAccountResourcesDo(
+        self,
+        *,
+        account_aid: str,
+        account=None,
+        tymth,
+        tock: float = 0.0,
+    ):
         sessions = self.ctx.store.listSessionsForAccount(account_aid)
         operations = self._accountResourceDeleteOps(
             account_aid=account_aid,
@@ -368,34 +412,16 @@ class Provisioner:
 
         logger.info(f"Resources teardown completed for account AID {account_aid}")
 
-    def deleteAccount(self, *, account_aid: str, account=None) -> None:
-        sessions = self.ctx.store.listSessionsForAccount(account_aid)
-        operations = self._accountResourceDeleteOps(
-            account_aid=account_aid,
-            account=account,
-            sessions=sessions,
-        )
-        logger.info(
-            f"Account deletion started for account AID {account_aid}"
-        )
-        # Delete hosted resources before removing local account/session rows.
-        self._deleteHostedResourceOps(
-            operations,
-            account=account,
-            context=f"account {account_aid} deletion",
-        )
-
-        self.ctx.store.deleteBindingsForPrincipal(account_aid)
-        self.ctx.store.deleteAccount(account_aid)
-        for session in sessions:
-            self.ctx.store.deleteSession(session.session_id)
-        logger.info(
-            f"Account deletion completed for account AID {account_aid}"
-            f" with {len(sessions)} sessions, {self._operationCount(operations, 'watcher')} watchers,"
-            f" and {self._operationCount(operations, 'witness')} witnesses deleted"
-        )
-
-    def deleteAccountDo(self, *, account_aid: str, account=None, tymth, tock: float = 0.0):
+    def deleteAccountDo(
+        self,
+        *,
+        account_aid: str,
+        account=None,
+        witness_boots=None,
+        watcher_boot=None,
+        tymth,
+        tock: float = 0.0,
+    ):
         sessions = self.ctx.store.listSessionsForAccount(account_aid)
         operations = self._accountResourceDeleteOps(
             account_aid=account_aid,
@@ -410,6 +436,8 @@ class Provisioner:
             operations,
             account=account,
             context=f"account {account_aid} deletion",
+            witness_boots=witness_boots,
+            watcher_boot=watcher_boot,
             tymth=tymth,
             tock=tock,
         )
@@ -424,7 +452,12 @@ class Provisioner:
             f" and {self._operationCount(operations, 'witness')} witnesses deleted"
         )
 
-    def _sessionResourceDeleteOps(self, *, session: SessionRecord, account=None) -> list[tuple[str, str]]:
+    def _sessionResourceDeleteOps(
+        self,
+        *,
+        session: SessionRecord,
+        account=None,
+    ) -> list[tuple[str, str]]:
         watcher_ids = self._collectSessionResourceIDs(kind="watcher", session=session, account=account)
         witness_ids = self._collectSessionResourceIDs(kind="witness", session=session, account=account)
         return self._resourceDeleteOps(watcher_ids=watcher_ids, witness_ids=witness_ids)
@@ -460,31 +493,6 @@ class Provisioner:
     def _operationCount(operations: list[tuple[str, str]], kind: str) -> int:
         return sum(1 for operation_kind, _eid in operations if operation_kind == kind)
 
-    def _deleteHostedResourceOps(
-        self,
-        operations: list[tuple[str, str]],
-        *,
-        session: SessionRecord | None = None,
-        account=None,
-        context: str,
-    ) -> None:
-        # Shared by sync and HIO cleanup paths so both keep the same error contract.
-        errors: list[BootError] = []
-        for kind, eid in operations:
-            try:
-                self.deleteHostedResource(
-                    kind=kind,
-                    eid=eid,
-                    session=session,
-                    account=account,
-                    tolerate_missing_remote=True,
-                )
-            except BootError as exc:
-                errors.append(exc)
-                logger.warning(f"{context} failed to delete {kind} resource {eid}: {exc}")
-
-        self._raiseResourceDeleteErrors(errors, context=context)
-
     def _deleteHostedResourceOpsDo(
         self,
         operations: list[tuple[str, str]],
@@ -492,10 +500,12 @@ class Provisioner:
         session: SessionRecord | None = None,
         account=None,
         context: str,
+        witness_boots=None,
+        watcher_boot=None,
         tymth,
         tock: float = 0.0,
     ):
-        # Shared by sync and HIO cleanup paths so both keep the same error contract.
+        # Collect every per-resource BootError before retrying the aggregate task.
         errors: list[BootError] = []
         for kind, eid in operations:
             try:
@@ -505,6 +515,8 @@ class Provisioner:
                     session=session,
                     account=account,
                     tolerate_missing_remote=True,
+                    witness_boots=witness_boots,
+                    watcher_boot=watcher_boot,
                     tymth=tymth,
                     tock=tock,
                 )
@@ -572,7 +584,13 @@ class Provisioner:
 
         return ordered
 
-    def _collectSessionResourceIDs(self, *, kind: str, session: SessionRecord, account=None) -> list[str]:
+    def _collectSessionResourceIDs(
+        self,
+        *,
+        kind: str,
+        session: SessionRecord,
+        account=None,
+    ) -> list[str]:
         ordered: list[str] = []
         seen: set[str] = set()
 
@@ -603,49 +621,6 @@ class Provisioner:
 
         return ordered
 
-    def deleteHostedResource(
-        self,
-        *,
-        kind: str,
-        eid: str,
-        session: SessionRecord | None = None,
-        account=None,
-        tolerate_missing_remote: bool = False,
-    ) -> None:
-        if not eid:
-            return
-
-        record = self.ctx.store.getResource(kind, eid)
-        if record is None:
-            logger.info(
-                f"Resource record not found for deletion for {kind} with EID {eid}"
-            )
-            self._removeResourceFromOwners(kind=kind, eid=eid, session=session, account=account)
-            self._persistOwnerState(session=session, account=account)
-            return
-        if kind == "witness":
-            delete_remote = self._witnessClientForRecord(record).deleteWitness
-        else:
-            delete_remote = self.ctx.watcher_boot.deleteWatcher
-        logger.info(
-            f"Resource deletion started for {kind} with EID {eid}",
-        )
-        try:
-            delete_remote(eid)
-        except BootError as exc:
-            if not (tolerate_missing_remote and exc.status_code == 404):
-                logger.warning(
-                    f"Resource deletion failed for {kind} with EID {eid}: {exc}",
-                )
-                raise
-            logger.info(
-                f"Resource not found during deletion for {kind} with EID {eid}, but tolerated: {exc}",
-            )
-        self._deleteLocalHostedResource(kind=kind, eid=eid, session=session, account=account)
-        logger.info(
-            f"Resource deletion completed for {kind} with EID {eid}"
-        )
-
     def deleteHostedResourceDo(
         self,
         *,
@@ -654,6 +629,8 @@ class Provisioner:
         session: SessionRecord | None = None,
         account=None,
         tolerate_missing_remote: bool = False,
+        witness_boots=None,
+        watcher_boot=None,
         tymth,
         tock: float = 0.0,
     ):
@@ -669,14 +646,16 @@ class Provisioner:
             self._persistOwnerState(session=session, account=account)
             return
         if kind == "witness":
+            boots = self.cleanup_witness_boots if witness_boots is None else witness_boots
             delete_remote = self._witnessClientForRecord(
                 record,
-                witness_boots=self.cleanup_witness_boots,
+                witness_boots=boots,
             ).deleteWitnessDo
         else:
-            if self.cleanup_watcher_boot is None:
+            boot = self.cleanup_watcher_boot if watcher_boot is None else watcher_boot
+            if boot is None:
                 raise BootError("Cleanup watcher boot client is not configured.", status_code=503)
-            delete_remote = self.cleanup_watcher_boot.deleteWatcherDo
+            delete_remote = boot.deleteWatcherDo
         logger.info(
             f"Resource deletion started for {kind} with EID {eid}",
         )
@@ -728,7 +707,12 @@ class Provisioner:
             elif account.watcher_eid == eid:
                 account.watcher_eid = ""
 
-    def _persistOwnerState(self, *, session: SessionRecord | None = None, account=None) -> None:
+    def _persistOwnerState(
+        self,
+        *,
+        session: SessionRecord | None = None,
+        account=None,
+    ) -> None:
         if session is not None:
             session.updated_at = nowIso()
             self.ctx.store.saveSession(session)
