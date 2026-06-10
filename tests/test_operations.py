@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 from hio.base import doing
@@ -16,11 +15,9 @@ from kfboot.basing import (
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_SUCCEEDED,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
-    SESSION_STATE_EXPIRED,
 )
 from kfboot.boot_client import BootError, HioBootClient
-from kfboot.operating import BootOperationDoer, BootOperationProcessor
-from kfboot.provisioning import Provisioner
+from kfboot.operating import BootOperationDoer
 from kfboot.runtime import build_doers
 from kfboot.store import Store
 
