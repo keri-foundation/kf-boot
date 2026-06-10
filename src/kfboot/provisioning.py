@@ -8,6 +8,8 @@ from typing import Any
 from keri import help
 
 from kfboot.basing import (
+    SESSION_STATE_CANCELLED,
+    SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
     SESSION_STATE_WITNESS_POOL_ALLOCATED,
     TERMINAL_SESSION_STATES,
@@ -190,6 +192,22 @@ class Provisioner:
             raise BootError(
                 session.failure_reason or "The onboarding session is in a failed state.",
                 status_code=409,
+            )
+        if session.state == SESSION_STATE_CANCELLED:
+            logger.warning(
+                "Session cancelled during resource provisioning"
+            )
+            raise BootError(
+                "The onboarding session was cancelled.",
+                status_code=409,
+            )
+        if session.state == SESSION_STATE_EXPIRED:
+            logger.warning(
+                "Session expired during resource provisioning"
+            )
+            raise BootError(
+                "The onboarding session has expired.",
+                status_code=410,
             )
         logger.info(
             f"Session in terminal state {session.state} during resource provisioning"

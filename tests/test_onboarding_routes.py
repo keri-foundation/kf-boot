@@ -28,6 +28,7 @@ from kfboot.basing import (
 from kfboot.boot_client import BootError
 from kfboot.config import AccountProfile
 from kfboot.limiting import Limiter
+from kfboot.operating import BootOperationDoer, BootOperationProcessor
 from .support import (
     FakeWatcherBoot,
     account_create_payload,
@@ -167,16 +168,14 @@ def test_in_flight_provisioning_does_not_resurrect_cancelled_session(contract):
             kind=BOOT_OPERATION_SESSION_PROVISION,
             subject=session_id,
         )[0]
-        session = contract.ctx.store.getSession(session_id)
-
-        provisioning = contract.ctx.exchanger.provisioner.provisionSessionResourcesDo(
-            session=session,
+        doer = BootOperationDoer(
+            store=contract.ctx.store,
             witness_boots=contract.ctx.witness_boots,
             watcher_boot=contract.ctx.watcher_boot,
-            operation_id=operation.operation_id,
-            tymth=lambda: 0.0,
-            tock=0.0,
+            processor=BootOperationProcessor(provisioner=contract.ctx.exchanger.provisioner),
+            batch_size=100,
         )
+        provisioning = doer.processDueDo(tymth=lambda: 0.0, tock=0.0)
         next(provisioning)
 
         cancel = post_cesr(
@@ -190,8 +189,12 @@ def test_in_flight_provisioning_does_not_resurrect_cancelled_session(contract):
         drain_do(provisioning)
 
         cancelled = contract.ctx.store.getSession(session_id)
+        updated_operation = contract.ctx.store.getBootOperation(operation.operation_id)
         assert cancelled.state == SESSION_STATE_CANCELLED
         assert cancelled.resources_cleaned_at == ""
+        assert updated_operation.state == BOOT_OPERATION_FAILED
+        assert updated_operation.last_error == "The onboarding session was cancelled."
+        assert updated_operation.result == {"status_code": 409}
         assert contract.ctx.store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session_id) is not None
         assert contract.ctx.store.countResources("witness") == 1
         assert contract.ctx.store.countResources("watcher") == 0

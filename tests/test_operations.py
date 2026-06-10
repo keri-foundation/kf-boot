@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
 import pytest
 from hio.base import doing
 from keri.app import habbing
@@ -13,9 +16,11 @@ from kfboot.basing import (
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_SUCCEEDED,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
+    SESSION_STATE_EXPIRED,
 )
 from kfboot.boot_client import BootError, HioBootClient
-from kfboot.operating import BootOperationDoer
+from kfboot.operating import BootOperationDoer, BootOperationProcessor
+from kfboot.provisioning import Provisioner
 from kfboot.runtime import build_doers
 from kfboot.store import Store
 
@@ -241,6 +246,38 @@ def test_operations_status_allows_operation_requester_on_onboarding_surface(cont
     assert body["operation"]["subject"] == "sess_requested"
     assert body["operation"]["state"] == "pending"
     assert body["operation"]["payload"] == {"session_id": "sess_requested"}
+
+
+def test_operations_status_refreshes_session_provision_lease_for_requester(contract):
+    with habbing.openHab(name="operation-lease-refresh", temp=True, transferable=False) as (_, requester):
+        register_aid(contract, "/onboarding", requester)
+        _, _, start_reply = start_session(contract, requester, drain_operations=False)
+        session_id = start_reply.ked["a"]["session_id"]
+        operation = contract.ctx.store.findActiveBootOperation(
+            kind=BOOT_OPERATION_SESSION_PROVISION,
+            subject=session_id,
+            requester=requester.pre,
+        )
+        assert operation is not None
+        session = contract.ctx.store.getSession(session_id)
+        original_expires_at = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        session.expires_at = original_expires_at
+        contract.ctx.store.saveSession(session)
+
+        response = post_cesr(
+            contract,
+            "/onboarding",
+            build_exn(
+                requester,
+                route="/operations/status",
+                payload={"operation_id": operation.operation_id},
+            ),
+        )
+
+    _, reply = assert_reply_frame(contract, response, route="/operations/status")
+    refreshed = contract.ctx.store.getSession(session_id)
+    assert reply.ked["a"]["operation"]["operation_id"] == operation.operation_id
+    assert datetime.fromisoformat(refreshed.expires_at) > datetime.fromisoformat(original_expires_at)
 
 
 def test_operations_status_rejects_wrong_sender(contract):
@@ -577,7 +614,12 @@ def test_boot_operation_doer_fails_unexpected_processor_errors(tmp_path):
 
 
 def test_runtime_build_doers_configures_operation_hio_boot_clients(tmp_path):
-    config = make_config(tmp_path, cleanup_interval_seconds=0)
+    config = make_config(
+        tmp_path,
+        cleanup_interval_seconds=0,
+        cleanup_block_after_attempts=2,
+        operation_failure_max_attempts=3,
+    )
     app, ctx = create_app(config=config, temp=True)
     try:
         doers = build_doers(app, ctx)
@@ -590,5 +632,6 @@ def test_runtime_build_doers_configures_operation_hio_boot_clients(tmp_path):
         assert all(client.clienter is operation_doer.clienter for client in operation_doer.witness_boots.values())
         assert isinstance(operation_doer.watcher_boot, HioBootClient)
         assert operation_doer.watcher_boot.clienter is operation_doer.clienter
+        assert operation_doer.failure_max_attempts == 3
     finally:
         ctx.close(clear=True)

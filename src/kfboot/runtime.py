@@ -51,7 +51,7 @@ def build_doers(app, ctx: Context) -> list:
             watcher_boot=operation_watcher_boot,
             processor=BootOperationProcessor(provisioner=ctx.exchanger.provisioner),
             clienter=operation_clienter,
-            failure_max_attempts=ctx.config.cleanup_block_after_attempts,
+            failure_max_attempts=ctx.config.operation_failure_max_attempts,
         )
     )
 

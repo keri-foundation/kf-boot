@@ -817,10 +817,12 @@ class OperationStatusHandler(RouteHandler):
 
         operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
         allowed = bool(sender and sender == operation.requester)
-        if not allowed and operation.kind == BOOT_OPERATION_SESSION_PROVISION:
+        session = None
+        if operation.kind == BOOT_OPERATION_SESSION_PROVISION:
             session_id = str(operation_payload.get("session_id") or operation.subject)
             session = self.exchanger.ctx.store.getSession(session_id)
-            allowed = session is not None and sender in {session.ephemeral_aid, session.account_aid}
+            if not allowed:
+                allowed = session is not None and sender in {session.ephemeral_aid, session.account_aid}
         elif not allowed and operation.kind == BOOT_OPERATION_WATCHER_STATUS_QUERY:
             watcher_id = str(operation_payload.get("watcher_id") or "")
             resource = self.exchanger.ctx.store.getResource("watcher", watcher_id)
@@ -843,6 +845,10 @@ class OperationStatusHandler(RouteHandler):
                 title="Wrong operation principal",
                 description="The authenticated sender is not allowed to read this operation.",
             )
+
+        if session is not None and session.state not in TERMINAL_SESSION_STATES:
+            self.exchanger.requireOpenSession(session)
+            self.exchanger.expirer.refreshSessionLease(session)
 
         self.exchanger.queueReply(
             self.resource,
