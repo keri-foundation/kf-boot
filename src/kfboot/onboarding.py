@@ -59,7 +59,7 @@ class CesrSurfaceEnd:
         msg = bytearray(serder.raw)
         msg.extend(cr.attachments.encode("utf-8"))
 
-        self.ctx.exchanger.setClientIp(req.remote_addr or "")
+        self.ctx.exchanger.setClientIp(_clientIp(req.remote_addr))
         self.ctx.exchanger.clearReplies()
 
         try:
@@ -200,6 +200,12 @@ def _parseCesrHttpRequest(req: falcon.Request, *, surface: str) -> CesrRequest:
         payload=data,
         attachments=req.headers[CESR_ATTACHMENT_HEADER],
     )
+
+
+def _clientIp(remote_addr) -> str:
+    if isinstance(remote_addr, tuple):
+        return str(remote_addr[0] or "")
+    return str(remote_addr or "")
 
 
 def _requireAcceptedKeystate(*, habery, serder) -> None:
