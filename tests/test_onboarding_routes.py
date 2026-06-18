@@ -843,13 +843,15 @@ def test_session_start_enforces_witness_capacity(contract_factory):
     )[0]
     assert operation.state == BOOT_OPERATION_FAILED
     assert "witness limit is 0" in operation.last_error
-    assert session.state == SESSION_STATE_STARTED
+    assert session.state == SESSION_STATE_FAILED
+    assert "witness limit is 0" in session.failure_reason
     assert session.witness_eids == []
     assert session.watcher_eid == ""
+    assert contract.ctx.store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session.session_id) is not None
     assert contract.ctx.store.countResources("witness") == 0
 
 
-def test_session_start_enforces_watcher_capacity_without_duplicate_witnesses(contract_factory):
+def test_session_start_enforces_watcher_capacity_and_blocks_blind_retry(contract_factory):
     contract = contract_factory(watcher_limit=0)
 
     with habbing.openHab(name="watcher-capacity", temp=True, transferable=False) as (_, ephemeral):
@@ -869,9 +871,11 @@ def test_session_start_enforces_watcher_capacity_without_duplicate_witnesses(con
         )[0]
         assert operation.state == BOOT_OPERATION_FAILED
         assert "watcher limit is 0" in operation.last_error
-        assert session.state == SESSION_STATE_WITNESS_POOL_ALLOCATED
+        assert session.state == SESSION_STATE_FAILED
+        assert "watcher limit is 0" in session.failure_reason
         assert len(session.witness_eids) == 1
         assert session.watcher_eid == ""
+        assert contract.ctx.store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session.session_id) is not None
         assert contract.ctx.store.countResources("witness") == 1
         assert contract.ctx.store.countResources("watcher") == 0
         assert len(total_witness_delete_calls(contract.ctx)) == 0
@@ -881,7 +885,8 @@ def test_session_start_enforces_watcher_capacity_without_duplicate_witnesses(con
             "/onboarding",
             build_exn(ephemeral, route="/onboarding/session/start", payload=start_payload()),
         )
-        assert retry.status_code == 200
+        assert retry.status_code == 409
+        assert retry.json["title"] == "Session failed"
         run_boot_operations(contract)
         assert total_witness_create_calls(contract.ctx) == 1
         assert contract.ctx.watcher_boot.create_calls == 0

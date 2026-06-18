@@ -60,6 +60,14 @@ ACCOUNT_ROUTES = {
     "/account/watchers/delete",
 }
 
+ACCOUNT_QUOTA_ROUTES = {
+    "/account/witnesses",
+    "/account/watchers",
+    "/account/watchers/status",
+    "/account/witnesses/delete",
+    "/account/watchers/delete",
+}
+
 
 # Account profile definitions are used to enforce per-tier limits and quotas.
 # Each profile maps a staging tier to a bootstrap code and runtime limits.

@@ -23,6 +23,7 @@ from kfboot.basing import (
     BOOT_OPERATION_FAILED,
     BOOT_OPERATION_PENDING,
     BOOT_OPERATION_RUNNING,
+    BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_SUCCEEDED,
     BootOperationDueRecord,
     BootOperationRecord,
@@ -473,8 +474,32 @@ class Store:
         operation.due_at = ""
         operation.claimed_at = ""
         operation.updated_at = current
+        self._failSessionProvisionOperation(operation, reason=last_error, now=current)
         self._saveBootOperation(operation, previous_due_at=previous_due_at)
         return operation
+
+    def _failSessionProvisionOperation(
+        self,
+        operation: BootOperationRecord,
+        *,
+        reason: str,
+        now: str,
+    ) -> None:
+        if operation.kind != BOOT_OPERATION_SESSION_PROVISION:
+            return
+
+        session_id = str(operation.payload.get("session_id") or operation.subject or "")
+        if not session_id:
+            return
+
+        session = self.getSession(session_id)
+        if session is None or session.state in TERMINAL_SESSION_STATES:
+            return
+
+        session.state = SESSION_STATE_FAILED
+        session.failure_reason = reason
+        session.updated_at = now
+        self.saveSession(session)
 
     def bootOperationPayload(self, operation: BootOperationRecord) -> dict[str, Any]:
         return {

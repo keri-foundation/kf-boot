@@ -20,7 +20,7 @@ from kfboot.basing import (
 from kfboot.boot_client import BootError
 from kfboot.config import AccountProfile
 from kfboot.store import Store
-from kfboot.limiting import Limiter
+from kfboot.limiting import ACCOUNT_REQUEST_SCOPE, Limiter
 
 from .support import (
     assert_reply_frame,
@@ -1601,6 +1601,62 @@ def test_account_request_quota_survives_store_reopen(tmp_path):
         assert excinfo.value.title == "Account request rate limit exceeded"
     finally:
         reopened_store.close()
+
+
+def test_operations_status_bypasses_normal_account_quota_metering(tmp_path):
+    config = make_config(
+        tmp_path,
+        bootstrap_account_options=("1-of-1",),
+        account_profiles=(
+            AccountProfile(
+                tier="trial",
+                code="1-of-1",
+                max_accounts=100,
+                max_requests_per_minute=1,
+                api_budget=1,
+            ),
+        ),
+    )
+    account_aid = "AID_STATUS_ACCOUNT"
+    serder = SimpleNamespace(
+        pre=account_aid,
+        ked={
+            "r": "/operations/status",
+            "a": {
+                "operation_id": "op_status",
+            },
+        },
+    )
+
+    store = Store(config.db_path, session_ttl_seconds=config.session_ttl_seconds)
+    try:
+        account = store.buildAccount(
+            account_aid=account_aid,
+            account_alias="status",
+            witness_profile_code="1-of-1",
+            witness_count=1,
+            toad=1,
+            watcher_required=True,
+            region_id="test-region",
+            region_name="Test Region",
+            session_id="SESSION123",
+            witness_eids=[],
+            watcher_eid="",
+            tier="trial",
+            onboarded=True,
+        )
+        store.saveAccount(account)
+
+        limiter = Limiter(SimpleNamespace(config=config, store=store))
+        limiter.enforceAccountQuotas(serder)
+        limiter.enforceAccountQuotas(serder)
+
+        updated = store.getAccount(account_aid)
+        assert updated is not None
+        assert updated.api_used == 0
+        assert store.getQuota(ACCOUNT_REQUEST_SCOPE, account_aid) is None
+    finally:
+        store.close()
 
 
 def test_account_is_set_to_expire_when_budget_fully_used(tmp_path, monkeypatch):

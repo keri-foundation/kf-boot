@@ -8,7 +8,7 @@ import falcon
 from keri import help
 
 from kfboot.basing import QuotaRecord
-from kfboot.config import ACCOUNT_ROUTES, ONBOARDING_QUOTA_ROUTES, ONBOARDING_ROUTES
+from kfboot.config import ACCOUNT_QUOTA_ROUTES, ONBOARDING_QUOTA_ROUTES
 from kfboot.utils import extractExnPayload, optionalStr
 from kfboot.store import nowIso
 
@@ -85,9 +85,9 @@ class Limiter:
     def precheckAccountQuotas(self, serder) -> None:
         """Apply only the pre-handler quota checks for onboarding/account requests."""
 
-        # Apply quotas only to onboarding and account routes
+        # Apply quotas only to onboarding and normal account business routes.
         route = str(serder.ked.get("r", "") or "")
-        if route not in ONBOARDING_ROUTES and route not in ACCOUNT_ROUTES:
+        if route not in ONBOARDING_QUOTA_ROUTES and route not in ACCOUNT_QUOTA_ROUTES:
             return
 
         # Check account context for the request
@@ -114,7 +114,7 @@ class Limiter:
         """
 
         route = str(serder.ked.get("r", "") or "")
-        if route not in ONBOARDING_ROUTES and route not in ACCOUNT_ROUTES:
+        if route not in ONBOARDING_QUOTA_ROUTES and route not in ACCOUNT_QUOTA_ROUTES:
             return
 
         payload = extractExnPayload(serder)
@@ -307,7 +307,7 @@ class Limiter:
                 return account_aid, profile
 
         # For account routes, resolve the account AID and profile based on the authenticated sender
-        if route in ACCOUNT_ROUTES:
+        if route in ACCOUNT_QUOTA_ROUTES:
             # Account routes are authenticated by the account AID sender.
             account_aid = sender
             account = self.ctx.store.getAccount(account_aid)

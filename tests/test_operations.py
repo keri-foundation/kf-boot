@@ -15,6 +15,8 @@ from kfboot.basing import (
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_SUCCEEDED,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
+    CLEANUP_TASK_SESSION_CLEANUP,
+    SESSION_STATE_FAILED,
 )
 from kfboot.boot_client import BootError, HioBootClient
 from kfboot.operating import BootOperationDoer
@@ -211,6 +213,44 @@ def test_boot_operation_payload_and_result_must_be_dicts(store):
     )
     with pytest.raises(ValueError):
         store.succeedBootOperation(operation.operation_id, result=["not", "a", "dict"])
+
+
+def test_failed_session_provision_operation_marks_session_failed(store):
+    session = store.createSession(
+        ephemeral_aid="E1",
+        account_aid="A1",
+        account_alias="alias",
+        chosen_profile_code="1-of-1",
+        client_ip="127.0.0.1",
+        region_id="default",
+        region_name="Default",
+        watcher_required=True,
+        witness_count=1,
+        toad=1,
+        account_tier="free",
+    )
+    operation = store.ensureBootOperation(
+        kind=BOOT_OPERATION_SESSION_PROVISION,
+        subject=session.session_id,
+        requester=session.ephemeral_aid,
+        route="/onboarding/session/start",
+        payload={"session_id": session.session_id},
+        due_at="2026-01-01T00:00:00+00:00",
+        now="2026-01-01T00:00:00+00:00",
+    )
+
+    store.failBootOperation(
+        operation.operation_id,
+        last_error="witness limit is 0",
+        result={"status_code": 409},
+        now="2026-01-01T00:00:01+00:00",
+    )
+
+    saved = store.getSession(session.session_id)
+    assert saved.state == SESSION_STATE_FAILED
+    assert saved.failure_reason == "witness limit is 0"
+    assert saved.updated_at == "2026-01-01T00:00:01+00:00"
+    assert store.getCleanupTask(CLEANUP_TASK_SESSION_CLEANUP, session.session_id) is not None
 
 
 def test_operations_status_allows_operation_requester_on_onboarding_surface(contract):
