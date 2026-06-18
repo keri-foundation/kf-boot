@@ -16,6 +16,7 @@ from .support import (
     make_config,
     make_witness_boots,
     register_aid,
+    run_boot_operations,
     start_session,
 )
 
@@ -69,6 +70,8 @@ def pending_account_bundle(contract):
         register_aid(contract, "/onboarding", ephemeral)
         _, _, start_reply = start_session(contract, ephemeral, account_aid=account.pre)
         session_id = start_reply.ked["a"]["session_id"]
+        run_boot_operations(contract)
+        session = contract.ctx.store.getSession(session_id)
 
         _, _, create_reply = create_account(contract, ephemeral, start_reply, account_aid=account.pre)
         register_aid(contract, "/account", account)
@@ -78,8 +81,8 @@ def pending_account_bundle(contract):
             "ephemeral": ephemeral,
             "account": account,
             "session_id": session_id,
-            "witness_ids": [row["eid"] for row in start_reply.ked["a"]["witnesses"]],
-            "watcher_id": start_reply.ked["a"]["watcher"]["eid"],
+            "witness_ids": list(session.witness_eids),
+            "watcher_id": session.watcher_eid,
             "start_reply": start_reply,
             "create_reply": create_reply,
         }

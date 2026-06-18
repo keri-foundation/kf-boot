@@ -7,6 +7,7 @@ from keri.app import httping, indirecting
 from kfboot.app import Context, create_app
 from kfboot.boot_client import HioBootClient
 from kfboot.config import Config
+from kfboot.operating import BootOperationDoer, BootOperationProcessor
 from kfboot.sweeping import CleanupDoer
 
 logger = help.ogler.getLogger(__name__)
@@ -28,6 +29,31 @@ def build_doers(app, ctx: Context) -> list:
         app=app,
     )
     service_doers = [http.ServerDoer(server=server)]
+
+    operation_clienter = httping.Clienter()
+    operation_witness_boots = {
+        backend.id: HioBootClient(
+            backend.boot_url,
+            clienter=operation_clienter,
+            timeout=ctx.config.boot_api_timeout_seconds,
+        )
+        for backend in ctx.config.witness_backends
+    }
+    operation_watcher_boot = HioBootClient(
+        ctx.config.wat_boot_url,
+        clienter=operation_clienter,
+        timeout=ctx.config.boot_api_timeout_seconds,
+    )
+    service_doers.append(
+        BootOperationDoer(
+            store=ctx.store,
+            witness_boots=operation_witness_boots,
+            watcher_boot=operation_watcher_boot,
+            processor=BootOperationProcessor(provisioner=ctx.exchanger.provisioner),
+            clienter=operation_clienter,
+            failure_max_attempts=ctx.config.operation_failure_max_attempts,
+        )
+    )
 
     if ctx.cleanup.expected_running:
         clienter = httping.Clienter()

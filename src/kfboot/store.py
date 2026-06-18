@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import os
 import secrets
 from dataclasses import dataclass
@@ -14,10 +15,18 @@ from kfboot.basing import (
     CLEANUP_TASK_SESSION_CLEANUP,
     CLEANUP_TASK_SESSION_DELETE,
     CLEANUP_TASK_SESSION_EXPIRE,
+    ACTIVE_BOOT_OPERATION_STATES,
     ACCOUNT_STATE_FAILED,
     ACCOUNT_STATE_EXPIRED,
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
+    BOOT_OPERATION_FAILED,
+    BOOT_OPERATION_PENDING,
+    BOOT_OPERATION_RUNNING,
+    BOOT_OPERATION_SESSION_PROVISION,
+    BOOT_OPERATION_SUCCEEDED,
+    BootOperationDueRecord,
+    BootOperationRecord,
     CleanupAdminActionRecord,
     CleanupDueRecord,
     CleanupTaskRecord,
@@ -52,6 +61,14 @@ def _sortValue(value: Any) -> Any:
 
 def _resourceValue(record: Any, field: str, default: Any = "") -> Any:
     return getattr(record, field, default)
+
+
+def _copyOperationDict(value: dict[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Operation payload and result values must be dictionaries.")
+    return deepcopy(value)
 
 
 def _resourceToApi(record: ResourceRecord, *, include_boot_url: bool = False) -> dict[str, Any]:
@@ -240,6 +257,293 @@ class Store:
 
     def deleteQuota(self, scope: str, subject: str) -> None:
         self.baser.quotas.rem(keys=(scope, subject))
+
+    def getBootOperation(self, operation_id: str) -> BootOperationRecord | None:
+        return self.baser.boot_operations.get(keys=(operation_id,))
+
+    def ensureBootOperation(
+        self,
+        *,
+        kind: str,
+        subject: str,
+        requester: str,
+        route: str,
+        idempotency_key: str = "",
+        payload: dict[str, Any] | None = None,
+        due_at: str | None = None,
+        now: str | None = None,
+    ) -> BootOperationRecord:
+        """Create a boot operation or reuse active work for this requester/kind/subject."""
+        existing = self.findActiveBootOperation(
+            kind=kind,
+            subject=subject,
+            requester=requester,
+        )
+        if existing is not None:
+            return existing
+
+        current = now or nowIso()
+        record = BootOperationRecord(
+            operation_id=_newOperationId(),
+            kind=kind,
+            subject=subject,
+            requester=requester,
+            route=route,
+            state=BOOT_OPERATION_PENDING,
+            idempotency_key=idempotency_key,
+            payload=_copyOperationDict(payload),
+            created_at=current,
+            updated_at=current,
+            due_at=due_at or current,
+        )
+        self._saveBootOperation(record)
+        return record
+
+    def findActiveBootOperation(
+        self,
+        *,
+        kind: str,
+        subject: str,
+        requester: str,
+    ) -> BootOperationRecord | None:
+        latest: BootOperationRecord | None = None
+        for _, record in self.baser.boot_operations.getTopItemIter(keys=()):
+            if record.kind != kind or record.subject != subject or record.requester != requester:
+                continue
+            if record.state not in ACTIVE_BOOT_OPERATION_STATES:
+                continue
+            if latest is None or record.created_at > latest.created_at:
+                latest = record
+        return latest
+
+    def listBootOperations(
+        self,
+        *,
+        kind: str | None = None,
+        subject: str | None = None,
+        requester: str | None = None,
+        states: set[str] | None = None,
+    ) -> list[BootOperationRecord]:
+        rows = []
+        for _, record in self.baser.boot_operations.getTopItemIter(keys=()):
+            if kind is not None and record.kind != kind:
+                continue
+            if subject is not None and record.subject != subject:
+                continue
+            if requester is not None and record.requester != requester:
+                continue
+            if states is not None and record.state not in states:
+                continue
+            rows.append(record)
+        rows.sort(key=lambda record: _sortValue(record.created_at), reverse=True)
+        return rows
+
+    def claimDueBootOperation(
+        self,
+        *,
+        now: str | None = None,
+        kind: str | None = None,
+    ) -> BootOperationRecord | None:
+        """Claim one pending due boot operation for the single root-runtime worker."""
+        current = now or nowIso()
+        current_key = _dueIndexKey(current)
+        stale: list[tuple[str, ...]] = []
+
+        for keys, _record in self.baser.boot_operation_due.getTopItemIter(keys=()):
+            due_key, operation_kind, operation_id = keys[-3:]
+            if due_key > current_key:
+                break
+            if kind is not None and operation_kind != kind:
+                continue
+
+            operation = self.getBootOperation(operation_id)
+            if (
+                operation is None
+                or operation.state != BOOT_OPERATION_PENDING
+                or not operation.due_at
+                or _dueIndexKey(operation.due_at) != due_key
+                or operation.kind != operation_kind
+            ):
+                stale.append(keys)
+                continue
+
+            previous_due_at = operation.due_at
+            operation.state = BOOT_OPERATION_RUNNING
+            operation.due_at = ""
+            operation.updated_at = current
+            operation.claimed_at = current
+            operation.last_attempt_at = current
+            operation.attempt_count += 1
+            self._saveBootOperation(operation, previous_due_at=previous_due_at)
+
+            for stale_keys in stale:
+                self.baser.boot_operation_due.rem(keys=stale_keys)
+
+            return operation
+
+        for keys in stale:
+            self.baser.boot_operation_due.rem(keys=keys)
+
+        return None
+
+    def requeueClaimedBootOperations(self, *, now: str | None = None) -> int:
+        """Make claimed boot operations visible again after process restart."""
+        current = now or nowIso()
+        recovered = 0
+        operations = [record for _, record in self.baser.boot_operations.getTopItemIter(keys=())]
+
+        for operation in operations:
+            if not operation.claimed_at or operation.state != BOOT_OPERATION_RUNNING:
+                continue
+
+            previous_due_at = operation.due_at
+            operation.state = BOOT_OPERATION_PENDING
+            operation.due_at = current
+            operation.updated_at = current
+            operation.claimed_at = ""
+            self._saveBootOperation(operation, previous_due_at=previous_due_at)
+            recovered += 1
+
+        return recovered
+
+    def rescheduleBootOperation(
+        self,
+        operation_id: str,
+        *,
+        due_at: str,
+        now: str | None = None,
+        last_error: str | None = None,
+        reset_attempts: bool = False,
+    ) -> BootOperationRecord | None:
+        operation = self.getBootOperation(operation_id)
+        if operation is None:
+            return None
+
+        current = now or nowIso()
+        previous_due_at = operation.due_at
+        operation.state = BOOT_OPERATION_PENDING
+        operation.due_at = due_at
+        operation.updated_at = current
+        operation.claimed_at = ""
+        if last_error is not None:
+            operation.last_error = last_error
+        if reset_attempts:
+            operation.attempt_count = 0
+        self._saveBootOperation(operation, previous_due_at=previous_due_at)
+        return operation
+
+    def succeedBootOperation(
+        self,
+        operation_id: str,
+        *,
+        result: dict[str, Any] | None = None,
+        now: str | None = None,
+    ) -> BootOperationRecord | None:
+        operation = self.getBootOperation(operation_id)
+        if operation is None:
+            return None
+
+        previous_due_at = operation.due_at
+        current = now or nowIso()
+        operation.state = BOOT_OPERATION_SUCCEEDED
+        operation.result = _copyOperationDict(result)
+        operation.last_error = ""
+        operation.due_at = ""
+        operation.claimed_at = ""
+        operation.updated_at = current
+        self._saveBootOperation(operation, previous_due_at=previous_due_at)
+        return operation
+
+    def failBootOperation(
+        self,
+        operation_id: str,
+        *,
+        last_error: str,
+        result: dict[str, Any] | None = None,
+        now: str | None = None,
+    ) -> BootOperationRecord | None:
+        operation = self.getBootOperation(operation_id)
+        if operation is None:
+            return None
+
+        previous_due_at = operation.due_at
+        current = now or nowIso()
+        operation.state = BOOT_OPERATION_FAILED
+        operation.result = _copyOperationDict(result)
+        operation.last_error = last_error
+        operation.due_at = ""
+        operation.claimed_at = ""
+        operation.updated_at = current
+        self._failSessionProvisionOperation(operation, reason=last_error, now=current)
+        self._saveBootOperation(operation, previous_due_at=previous_due_at)
+        return operation
+
+    def _failSessionProvisionOperation(
+        self,
+        operation: BootOperationRecord,
+        *,
+        reason: str,
+        now: str,
+    ) -> None:
+        if operation.kind != BOOT_OPERATION_SESSION_PROVISION:
+            return
+
+        session_id = str(operation.payload.get("session_id") or operation.subject or "")
+        if not session_id:
+            return
+
+        session = self.getSession(session_id)
+        if session is None or session.state in TERMINAL_SESSION_STATES:
+            return
+
+        session.state = SESSION_STATE_FAILED
+        session.failure_reason = reason
+        session.updated_at = now
+        self.saveSession(session)
+
+    def bootOperationPayload(self, operation: BootOperationRecord) -> dict[str, Any]:
+        return {
+            "operation_id": operation.operation_id,
+            "kind": operation.kind,
+            "subject": operation.subject,
+            "requester": operation.requester,
+            "route": operation.route,
+            "state": operation.state,
+            "idempotency_key": operation.idempotency_key,
+            "payload": _copyOperationDict(operation.payload),
+            "result": _copyOperationDict(operation.result),
+            "last_error": operation.last_error,
+            "attempt_count": operation.attempt_count,
+            "created_at": operation.created_at,
+            "updated_at": operation.updated_at,
+            "due_at": operation.due_at,
+            "claimed_at": operation.claimed_at,
+            "last_attempt_at": operation.last_attempt_at,
+        }
+
+    def _saveBootOperation(
+        self,
+        record: BootOperationRecord,
+        *,
+        previous_due_at: str | None = None,
+    ) -> None:
+        previous = previous_due_at if previous_due_at is not None else ""
+        if previous and previous != record.due_at:
+            self.baser.boot_operation_due.rem(
+                keys=(_dueIndexKey(previous), record.kind, record.operation_id)
+            )
+
+        self.baser.boot_operations.pin(keys=(record.operation_id,), val=record)
+
+        if record.due_at and record.state == BOOT_OPERATION_PENDING:
+            self.baser.boot_operation_due.pin(
+                keys=(_dueIndexKey(record.due_at), record.kind, record.operation_id),
+                val=BootOperationDueRecord(
+                    operation_id=record.operation_id,
+                    kind=record.kind,
+                    due_at=record.due_at,
+                ),
+            )
 
     def getCleanupTask(self, kind: str, subject: str) -> CleanupTaskRecord | None:
         """Return the cleanup task for a specific kind/subject pair"""
@@ -2044,3 +2348,7 @@ def _dueIndexKey(value: str) -> str:
 
 def _newSessionId() -> str:
     return f"sess_{secrets.token_urlsafe(12)}"
+
+
+def _newOperationId() -> str:
+    return f"op_{secrets.token_urlsafe(12)}"

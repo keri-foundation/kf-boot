@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 from falcon import testing
@@ -12,6 +13,7 @@ from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXP
 
 from kfboot.boot_client import BootError
 from kfboot.config import Config, WitnessBackend
+from kfboot.operating import BootOperationDoer, BootOperationProcessor
 
 
 class FakeWitnessBoot:
@@ -51,6 +53,17 @@ class FakeWitnessBoot:
 
     def allocateWitness(self, account_aid: str) -> dict[str, Any]:
         return self.createWitness(account_aid)
+
+    def allocateWitnessDo(
+        self,
+        account_aid: str,
+        *,
+        idempotency_key: str = "",
+        tymth,
+        tock: float = 0.0,
+    ):
+        yield tock
+        return self.allocateWitness(account_aid)
 
     def deleteWitness(self, eid: str) -> None:
         self.delete_calls.append(eid)
@@ -108,6 +121,18 @@ class FakeWatcherBoot:
     def allocateWatcher(self, account_aid: str, oobi: str | None = None) -> dict[str, Any]:
         return self.createWatcher(account_aid, oobi=oobi)
 
+    def allocateWatcherDo(
+        self,
+        account_aid: str,
+        *,
+        oobi: str | None = None,
+        idempotency_key: str = "",
+        tymth,
+        tock: float = 0.0,
+    ):
+        yield tock
+        return self.allocateWatcher(account_aid, oobi=oobi)
+
     def deleteWatcher(self, eid: str) -> None:
         self.delete_calls.append(eid)
         if self.delete_error is not None:
@@ -122,6 +147,10 @@ class FakeWatcherBoot:
         if self.status_error is not None:
             raise self.status_error
         return {"eid": eid, **self.status_response}
+
+    def watcherStatusDo(self, eid: str, *, tymth, tock: float = 0.0):
+        yield tock
+        return self.watcherStatus(eid)
 
 
 def make_witness_backends(count: int = 4) -> tuple[WitnessBackend, ...]:
@@ -201,6 +230,23 @@ def sweep_do(
             tymth=lambda: 0.0,
             tock=0.0,
         )
+    )
+
+
+def run_boot_operations(client: testing.TestClient, *, max_steps: int = 200):
+    doer = BootOperationDoer(
+        store=client.ctx.store,
+        witness_boots=client.ctx.witness_boots,
+        watcher_boot=client.ctx.watcher_boot,
+        processor=BootOperationProcessor(provisioner=client.ctx.exchanger.provisioner),
+        batch_size=100,
+    )
+    return drain_do(
+        doer.processDueDo(
+            tymth=lambda: 0.0,
+            tock=0.0,
+        ),
+        max_steps=max_steps,
     )
 
 
@@ -383,13 +429,35 @@ def register_aid(client: testing.TestClient, path: str, hab) -> None:
 #     return hab.msgOwnEvent(sn=sn, framed=True)
 
 
-def start_session(client: testing.TestClient, hab, **overrides: Any) -> tuple[Any, list[SerderKERI], SerderKERI]:
+def session_status(client: testing.TestClient, hab, session_id: str) -> tuple[Any, list[SerderKERI], SerderKERI]:
+    response = post_cesr(
+        client,
+        "/onboarding",
+        build_exn(hab, route="/onboarding/session/status", payload={"session_id": session_id}),
+    )
+    serders, reply = assert_reply_frame(client, response, route="/onboarding/session/status")
+    return response, serders, reply
+
+
+def start_session(
+    client: testing.TestClient,
+    hab,
+    *,
+    drain_operations: bool = True,
+    **overrides: Any,
+) -> tuple[Any, list[SerderKERI], SerderKERI]:
     response = post_cesr(
         client,
         "/onboarding",
         build_exn(hab, route="/onboarding/session/start", payload=start_payload(**overrides)),
     )
     serders, reply = assert_reply_frame(client, response, route="/onboarding/session/start")
+    if drain_operations:
+        run_boot_operations(client)
+        _, _, status_reply = session_status(client, hab, reply.ked["a"]["session_id"])
+        ked = dict(status_reply.ked)
+        ked["r"] = reply.ked["r"]
+        reply = SimpleNamespace(ked=ked)
     return response, serders, reply
 
 
