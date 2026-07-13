@@ -6,7 +6,7 @@ from typing import Any
 
 from falcon import testing
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
-from keri.core import exchange
+from keri.core import eventing, exchange
 from keri.core.serdering import SerderKERI
 from kfboot.store import Store, makeRecord
 from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
@@ -360,7 +360,12 @@ def build_signed_serder(hab, serder: SerderKERI, *, end: bytes | bytearray = b""
 
 
 def build_exn(hab, *, route: str, payload: dict[str, Any]) -> bytes:
-    serder = exchange(sender=hab.pre, route=route, attributes=payload)
+    serder = exchange(
+        sender=hab.pre,
+        route=route,
+        attributes=payload,
+        kind=eventing.Kinds.json,
+    )
     return build_signed_serder(hab, serder)
 
 
