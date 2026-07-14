@@ -4,6 +4,7 @@ import pytest
 from keri.app import habbing
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import eventing
+from keri.kering import Kinds, Vrsn_2_0
 
 from kfboot.app import create_app
 from kfboot.onboarding import _clientIp
@@ -73,7 +74,7 @@ def test_public_discovery_stays_plain_json_and_reply_frames_prepend_boot_kel(con
         register_aid(contract, "/onboarding", ephemeral)
         response, serders, reply = start_session(contract, ephemeral)
 
-        assert response.content.startswith(contract.ctx.host_hab.replay())
+        assert response.content.startswith(contract.ctx.exchanger.hostKELReplay())
         assert "connection" not in {key.lower() for key in response.headers}
         assert serders[0].ked["t"] == "icp"
         assert reply.ked["r"] == "/onboarding/session/start"
@@ -252,7 +253,15 @@ def test_surface_separation_rejects_routes_from_the_other_surface(contract, path
 @pytest.mark.parametrize(("path", "surface"), [("/onboarding", "onboarding"), ("/account", "account")])
 def test_surfaces_reject_non_exn_business_messages(contract, path, surface):
     with habbing.openHab(name=f"qry-{surface}", temp=True, transferable=False) as (_, hab):
-        qry = eventing.query(pre=hab.pre, route="logs", query={"i": hab.pre})
+        qry = eventing.query(
+            pre=hab.pre,
+            route="logs",
+            query={"i": hab.pre},
+            version=Vrsn_2_0,
+            pvrsn=Vrsn_2_0,
+            gvrsn=Vrsn_2_0,
+            kind=Kinds.json,
+        )
         response = post_cesr(contract, path, build_signed_serder(hab, qry))
 
     assert response.status_code == 400
