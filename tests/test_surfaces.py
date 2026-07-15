@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from falcon import testing
 from keri.app import habbing
+from keri.app.configing import Configer
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import eventing
+from keri.kering import Kinds, Vrsn_1_0, Vrsn_2_0
 
 from kfboot.app import create_app
 from kfboot.onboarding import _clientIp
@@ -73,12 +76,59 @@ def test_public_discovery_stays_plain_json_and_reply_frames_prepend_boot_kel(con
         register_aid(contract, "/onboarding", ephemeral)
         response, serders, reply = start_session(contract, ephemeral)
 
-        assert response.content.startswith(contract.ctx.host_hab.replay())
+        assert response.content.startswith(contract.ctx.exchanger.hostKELReplay())
         assert "connection" not in {key.lower() for key in response.headers}
         assert serders[0].ked["t"] == "icp"
         assert reply.ked["r"] == "/onboarding/session/start"
         assert reply.ked["i"] == contract.ctx.host_hab.pre
         assert reply.ked["a"]["session_id"].startswith("sess_")
+
+
+def test_persisted_v1_boot_hab_accepts_v2_client_event(tmp_path):
+    config = make_config(tmp_path)
+    cf = Configer(
+        name=config.keri_name,
+        base="",
+        temp=False,
+        reopen=True,
+        clear=False,
+        headDirPath=config.keri_dir,
+    )
+    hby = habbing.Habery(
+        name=config.keri_name,
+        temp=False,
+        headDirPath=config.keri_dir,
+        cf=cf,
+    )
+    try:
+        hby.makeHab(
+            name=config.boot_hab_name,
+            transferable=True,
+            isith="1",
+            icount=1,
+            nsith="1",
+            ncount=1,
+            version=Vrsn_1_0,
+            kind=Kinds.json,
+        )
+    finally:
+        hby.close(clear=False)
+
+    app, ctx = create_app(config=config, temp=False)
+    client = testing.TestClient(app)
+    try:
+        with habbing.openHab(
+            name="v2-upgrade-client",
+            temp=True,
+            transferable=False,
+            version=Vrsn_2_0,
+            kind=Kinds.json,
+        ) as (_, hab):
+            response = post_cesr(client, "/onboarding", hab.msgOwnInception())
+
+        assert response.status_code == 204
+    finally:
+        ctx.close(clear=True)
 
 
 def test_client_ip_normalizes_hio_tuple_remote_addr():
@@ -252,7 +302,15 @@ def test_surface_separation_rejects_routes_from_the_other_surface(contract, path
 @pytest.mark.parametrize(("path", "surface"), [("/onboarding", "onboarding"), ("/account", "account")])
 def test_surfaces_reject_non_exn_business_messages(contract, path, surface):
     with habbing.openHab(name=f"qry-{surface}", temp=True, transferable=False) as (_, hab):
-        qry = eventing.query(pre=hab.pre, route="logs", query={"i": hab.pre})
+        qry = eventing.query(
+            pre=hab.pre,
+            route="logs",
+            query={"i": hab.pre},
+            version=Vrsn_2_0,
+            pvrsn=Vrsn_2_0,
+            gvrsn=Vrsn_2_0,
+            kind=Kinds.json,
+        )
         response = post_cesr(contract, path, build_signed_serder(hab, qry))
 
     assert response.status_code == 400

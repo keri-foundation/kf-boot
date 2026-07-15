@@ -6,7 +6,7 @@ from typing import Any
 
 import falcon
 from keri import help
-from keri.kering import Vrsn_1_0
+from keri.kering import Kinds
 from keri.peer.exchanging import Exchanger
 
 from kfboot.basing import (
@@ -1295,19 +1295,30 @@ class BootExchanger(Exchanger):
         return operations[0] if operations else None
 
     def queueReply(self, route: str, receiver: str, payload: dict[str, Any]) -> None:
-        stream = bytearray(self.host_hab.replay())
+        stream = self.hostKELReplay()
+        pvrsn = self.host_hab.kever.serder.pvrsn
         stream.extend(
             self.host_hab.exchange(
                 route=route,
                 attributes=payload,
                 receiver=receiver or "",
-                gvrsn=Vrsn_1_0,
+                version=pvrsn,
+                pvrsn=pvrsn,
+                gvrsn=pvrsn,
+                kind=Kinds.json,
             )
         )
         self.reply_streams.append(bytes(stream))
         logger.debug(
             f"Reply queued for route {route} to receiver {receiver}",
         )
+
+    def hostKELReplay(self) -> bytearray:
+        pvrsn = self.host_hab.kever.serder.pvrsn
+        stream = bytearray()
+        for sn in range(self.host_hab.kever.sn + 1):
+            stream.extend(self.host_hab.msgOwnEvent(sn=sn, gvrsn=pvrsn))
+        return stream
 
     def processEvent(self, serder, tsgs=None, cigars=None, ptds=None, essrs=None, **kwa):
         try:

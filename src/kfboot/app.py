@@ -10,7 +10,6 @@ from keri.app.habbing import Habery
 from keri.core import Parser
 from keri.core.eventing import Kevery
 from keri.core.kraming import Kramer
-from keri.kering import Vrsn_1_0
 
 from kfboot.boot_exchanger import BootContext, BootExchanger
 from kfboot.config import Config
@@ -194,7 +193,7 @@ def create_app(config: Config | None = None, *, temp: bool = False) -> tuple[fal
     kramer = Kramer(db=hby.db, cf=StaticConfig(DEFAULT_KRAM_CONFIG))
     kvy = Kevery(db=hby.db, lax=False, local=False, rvy=hby.rvy, exc=exchanger, kramer=kramer)
     kvy.registerReplyRoutes(router=hby.rtr)
-    parser = Parser(framed=True, kvy=kvy, rvy=hby.rvy, exc=exchanger, local=False, version=Vrsn_1_0)
+    parser = Parser(framed=True, kvy=kvy, rvy=hby.rvy, exc=exchanger, local=False, version=host_hab.kever.serder.pvrsn)
 
     hby.exc = exchanger
     hby.kvy = kvy

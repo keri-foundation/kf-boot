@@ -63,7 +63,12 @@ class CesrSurfaceEnd:
         self.ctx.exchanger.clearReplies()
 
         try:
-            self.ctx.parser.parseOne(ims=msg, exc=self.ctx.exchanger, local=False)
+            self.ctx.parser.parseOne(
+                ims=msg,
+                exc=self.ctx.exchanger,
+                local=False,
+                version=serder.pvrsn,
+            )
         except falcon.HTTPError:
             raise
         except (MissingAuthAttachmentError, MissingSenderKeyStateError, MissingSignatureError) as exc:
