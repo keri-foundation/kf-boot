@@ -145,14 +145,14 @@ Business handlers run only after the request has been parsed through the KRAM-en
 ## Onboarding Flow
 
 1. `locksmith` fetches `GET /bootstrap/config`.
-2. `locksmith` creates a hidden ephemeral onboarding AID locally.
-3. `locksmith` sends the ephemeral inception or keystate material to the onboarding surface.
-4. `locksmith` sends authenticated `exn /onboarding/session/start`.
-5. `kf-boot` creates or reuses a durable session provisioning operation and replies with a signed boot-server `exn`.
-6. The root HIO boot operation worker allocates the witness pool and required hosted watcher.
-7. `locksmith` polls `exn /operations/status` or `exn /onboarding/session/status` until provisioning succeeds.
-8. `locksmith` creates the permanent local account AID using the returned witness list.
-9. `locksmith` finishes local witness registration and resolves witness and watcher OOBIs.
+2. `locksmith` creates or selects the permanent local account AID.
+3. `locksmith` creates a hidden ephemeral onboarding AID locally.
+4. `locksmith` sends the ephemeral inception or keystate material to the onboarding surface.
+5. `locksmith` sends authenticated `exn /onboarding/session/start` with the permanent account AID.
+6. `kf-boot` creates or reuses a durable session provisioning operation and replies with a signed boot-server `exn`.
+7. The root HIO boot operation worker allocates the witness pool and required hosted watcher.
+8. `locksmith` polls `exn /operations/status` or `exn /onboarding/session/status` until provisioning succeeds.
+9. `locksmith` registers the permanent account AID with the allocated witnesses, rotates it onto that witness set, and resolves the witness and watcher OOBIs.
 10. `locksmith` sends authenticated `exn /onboarding/account/create`.
 11. `locksmith` sends authenticated `exn /onboarding/complete`.
 12. Future operations move to the approved-account surface and use the permanent account AID.
@@ -164,7 +164,8 @@ Business handlers run only after the request has been parsed through the KRAM-en
 - witness profile is `1-of-1` or `3-of-4`
 - `1-of-1` means one distinct configured witness backend
 - `3-of-4` means four distinct configured witness backends
-- the service allocates the witness pool before permanent account inception
+- the permanent account AID is supplied when the onboarding session starts
+- the service allocates the witness pool before the account AID rotates onto it
 - one hosted watcher is required before onboarding completes
 
 ## State And Retry Rules
