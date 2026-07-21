@@ -1362,110 +1362,9 @@ def test_onboarding_request_quota_survives_store_reopen(tmp_path):
     finally:
         reopened_store.close()
 
-def test_session_start_rejects_account_alias_over_limit(contract_factory):
-    """Verify onboarding rejects a new session when the alias already has the max onboarded accounts."""
-    contract = contract_factory(
-        bootstrap_accounts_per_ip=100,
-        bootstrap_aids_per_ip=100,
-        bootstrap_account_options=("1-of-1",),
-        account_profiles=(
-            AccountProfile(
-                tier="trial",
-                code="1-of-1",
-                max_accounts=1,
-                max_requests_per_minute=100,
-                api_budget=100
-            ),
-        ),
-    )
 
-    with (
-        habbing.openHab(name="alias-limit-ephemeral-1", temp=True, transferable=False) as (_, ephemeral1),
-        habbing.openHab(name="alias-limit-account-1", temp=True) as (_, account1),
-        habbing.openHab(name="alias-limit-ephemeral-2", temp=True, transferable=False) as (_, ephemeral2),
-    ):
-        register_aid(contract, "/onboarding", ephemeral1)
-        register_aid(contract, "/account", account1)
-
-        # Start and complete a session 
-        _, _, start_reply = start_session(contract, ephemeral1, account_aid=account1.pre)
-        create_account(contract, ephemeral1, start_reply, account_aid=account1.pre)
-        _, _, _ = complete_session(
-            contract,
-            ephemeral1,
-            session_id=start_reply.ked["a"]["session_id"],
-            account_aid=account1.pre,
-        )
-
-        register_aid(contract, "/onboarding", ephemeral2)
-
-        # Attempt to start a session with a different ephemeral but the same alias
-        # which should be rejected because the alias already has the max onboarded accounts
-        response = post_cesr(
-            contract,
-            "/onboarding",
-            build_exn(ephemeral2, route="/onboarding/session/start", payload=start_payload(account_aid="AID_SECOND", account_alias="alpha")),
-        )
-
-    assert response.status_code == 429
-    assert response.json["title"] == "Account alias limit exceeded"
-    assert "configured limit for tier 'trial' is 1" in response.json["description"]
-
-
-def test_session_start_rejects_alias_when_existing_account_is_pending(contract_factory):
-    """Verify onboarding rejects a new session when the alias already has an account pending onboarding."""
-    contract = contract_factory(
-        bootstrap_accounts_per_ip=100,
-        bootstrap_aids_per_ip=100,
-        bootstrap_account_options=("1-of-1",),
-        account_profiles=(
-            AccountProfile(
-                tier="trial",
-                code="1-of-1",
-                max_accounts=1,
-                max_requests_per_minute=100,
-                api_budget=100
-            ),
-        ),
-    )
-
-    with (
-        habbing.openHab(name="alias-pending-ephemeral-1", temp=True, transferable=False) as (_, ephemeral1),
-        habbing.openHab(name="alias-pending-account-1", temp=True) as (_, account1),
-        habbing.openHab(name="alias-pending-ephemeral-2", temp=True, transferable=False) as (_, ephemeral2),
-    ):
-        # Don't complete the session to leave the account in pending onboarding status
-        register_aid(contract, "/onboarding", ephemeral1)
-        register_aid(contract, "/account", account1)
-
-        _, _, start_reply = start_session(
-            contract,
-            ephemeral1,
-            account_aid=account1.pre,
-            account_alias="alpha",
-        )
-        
-        create_account(contract, ephemeral1, start_reply, account_aid=account1.pre)
-
-        # Register and start a session with a different ephemeral but the same alias
-        register_aid(contract, "/onboarding", ephemeral2)
-        response = post_cesr(
-            contract,
-            "/onboarding",
-            build_exn(
-                ephemeral2,
-                route="/onboarding/session/start",
-                payload=start_payload(account_aid="AID_SECOND", account_alias="alpha"),
-            ),
-        )
-    # Assert the second session is rejected due to the alias already having an account pending onboarding
-    assert response.status_code == 429
-    assert response.json["title"] == "Account alias limit exceeded"
-    assert "configured limit for tier 'trial' is 1" in response.json["description"]
-
-
-def test_session_start_counts_uncleaned_closed_sessions_toward_alias_limits(contract_factory):
-    """Alias limits should include stale sessions whose resources are still being reclaimed."""
+def test_different_accounts_can_reuse_account_alias(contract_factory):
+    """Account aliases are local labels, not global admission principals."""
     contract = contract_factory(
         bootstrap_accounts_per_ip=100,
         bootstrap_aids_per_ip=100,
@@ -1482,40 +1381,55 @@ def test_session_start_counts_uncleaned_closed_sessions_toward_alias_limits(cont
     )
 
     with (
-        habbing.openHab(name="alias-cleanup-debt-1", temp=True, transferable=False) as (_, first),
-        habbing.openHab(name="alias-cleanup-debt-2", temp=True, transferable=False) as (_, second),
+        habbing.openHab(name="shared-alias-ephemeral-1", temp=True, transferable=False) as (_, ephemeral1),
+        habbing.openHab(name="shared-alias-account-1", temp=True) as (_, account1),
+        habbing.openHab(name="shared-alias-ephemeral-2", temp=True, transferable=False) as (_, ephemeral2),
+        habbing.openHab(name="shared-alias-account-2", temp=True) as (_, account2),
     ):
-        # Register 2 AIDs
-        register_aid(contract, "/onboarding", first)
-        register_aid(contract, "/onboarding", second)
+        register_aid(contract, "/onboarding", ephemeral1)
+        register_aid(contract, "/account", account1)
+        register_aid(contract, "/onboarding", ephemeral2)
+        register_aid(contract, "/account", account2)
 
-        # Start a session with the 1st AID
-        _, _, first_reply = start_session(
+        _, _, first_start = start_session(
             contract,
-            first,
-            account_aid="AID_ALIAS_FIRST",
-            account_alias="alpha",
+            ephemeral1,
+            account_aid=account1.pre,
+            account_alias="shared",
         )
-        
-        # 1st AID's session becomes stale
-        stale = contract.ctx.store.getSession(first_reply.ked["a"]["session_id"])
-        stale.expires_at = "2000-01-01T00:00:00+00:00"
-        contract.ctx.store.saveSession(stale)
-        contract.ctx.exchanger.expirer.markSessionExpired(stale, now="2000-01-01T00:00:00+00:00")
+        create_account(contract, ephemeral1, first_start, account_aid=account1.pre)
+        complete_session(
+            contract,
+            ephemeral1,
+            session_id=first_start.ked["a"]["session_id"],
+            account_aid=account1.pre,
+        )
 
-        # Send another session start request with the 2nd AID 
-        response = post_cesr(
+        second_response, _, second_start = start_session(
             contract,
-            "/onboarding",
-            build_exn(
-                second,
-                route="/onboarding/session/start",
-                payload=start_payload(account_aid="AID_ALIAS_SECOND", account_alias="alpha"),
-            ),
+            ephemeral2,
+            account_aid=account2.pre,
+            account_alias="shared",
         )
-    # Assert request was denied because of limit reached
-    assert response.status_code == 429
-    assert response.json["title"] == "Account alias limit exceeded"
+        create_account(contract, ephemeral2, second_start, account_aid=account2.pre)
+        complete_session(
+            contract,
+            ephemeral2,
+            session_id=second_start.ked["a"]["session_id"],
+            account_aid=account2.pre,
+        )
+
+    first_record = contract.ctx.store.getAccount(account1.pre)
+    second_record = contract.ctx.store.getAccount(account2.pre)
+
+    assert account1.pre != account2.pre
+    assert second_response.status_code == 200
+    assert first_record is not None
+    assert second_record is not None
+    assert first_record.status == ACCOUNT_STATE_ONBOARDED
+    assert second_record.status == ACCOUNT_STATE_ONBOARDED
+    assert first_record.account_alias == "shared"
+    assert second_record.account_alias == "shared"
 
 
 def test_account_create_rejects_expired_permanent_account(contract_factory):

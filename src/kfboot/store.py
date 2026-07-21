@@ -227,8 +227,8 @@ class Store:
 
         Past-due sessions can still have live hosted witnesses/watchers before the
         expirer marks them terminal and runs cleanup. We keep counting that debt so
-        the caller cannot wait for TTL expiry and immediately allocate a fresh set
-        of resources from the same IP or alias.
+        the caller cannot wait for TTL expiry and immediately allocate a new set
+        of resources from the same IP.
         """
         if self._sessionHasCleanupDebt(record):
             return True
@@ -244,8 +244,8 @@ class Store:
 
         Active sessions count towards onboarding capacity, but so do past-due or
         closed sessions that still own hosted resources. We keep counting that
-        debt so callers cannot rotate principals or aliases to hoard capacity
-        while the sweeper is still reclaiming the previous session's resources.
+        debt so a caller cannot start a new allocation while the sweeper is still
+        reclaiming resources from the previous session.
         """
         return self._sessionIsActive(record, now=now) or self._sessionHasAdmissionDebt(record, now=now)
 
@@ -2051,15 +2051,6 @@ class Store:
     def listAccounts(self) -> list[AccountRecord]:
         return [record for _, record in self.baser.accounts.getTopItemIter(keys=())]
 
-    def listAccountsForAlias(self, account_alias: str) -> list[AccountRecord]:
-        """Return a list of AccountRecords matching the given account alias"""
-        rows: list[AccountRecord] = []
-        for _, record in self.baser.accounts.getTopItemIter(keys=()):
-            if record.account_alias == account_alias:
-                rows.append(record)
-        rows.sort(key=lambda record: _sortValue(record.created_at), reverse=True)
-        return rows
-
     def listActiveSessionsForIp(self, client_ip: str) -> list[SessionRecord]:
         rows = []
         for _, record in self.baser.sessions.getTopItemIter(keys=()):
@@ -2076,30 +2067,6 @@ class Store:
         rows = []
         for _, record in self.baser.sessions.getTopItemIter(keys=()):
             if record.client_ip != client_ip:
-                continue
-            if not self._sessionConsumesAdmission(record, now=now):
-                continue
-            rows.append(record)
-        rows.sort(key=lambda record: _sortValue(record.created_at), reverse=True)
-        return rows
-
-    def listActiveSessionsForAlias(self, account_alias: str) -> list[SessionRecord]:
-        """Return a list of active SessionRecords matching the given account alias"""
-        rows = []
-        for _, record in self.baser.sessions.getTopItemIter(keys=()):
-            if record.account_alias != account_alias:
-                continue
-            if not self._sessionIsActive(record):
-                continue
-            rows.append(record)
-        rows.sort(key=lambda record: _sortValue(record.created_at), reverse=True)
-        return rows
-
-    def listAdmissionSessionsForAlias(self, account_alias: str, *, now: str | None = None) -> list[SessionRecord]:
-        """Return alias sessions that still occupy onboarding capacity."""
-        rows = []
-        for _, record in self.baser.sessions.getTopItemIter(keys=()):
-            if record.account_alias != account_alias:
                 continue
             if not self._sessionConsumesAdmission(record, now=now):
                 continue
