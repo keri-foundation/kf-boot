@@ -1659,8 +1659,8 @@ def test_operations_status_bypasses_normal_account_quota_metering(tmp_path):
         store.close()
 
 
-def test_account_is_set_to_expire_when_budget_fully_used(tmp_path, monkeypatch):
-    # Set clock to 2026-01-01T00:00:00+00:00 
+def test_account_api_budget_persists_and_expires_when_fully_used(tmp_path, monkeypatch):
+    """The fixed API budget must persist and expire the account when exhausted."""
     freeze_boot_time(monkeypatch, datetime(2026, 1, 1, tzinfo=UTC))
     config = make_config(
         tmp_path,
@@ -1671,26 +1671,23 @@ def test_account_is_set_to_expire_when_budget_fully_used(tmp_path, monkeypatch):
                 code="1-of-1",
                 max_accounts=100,
                 max_requests_per_minute=100,
-                api_budget=1,
+                api_budget=2,
             ),
         ),
     )
-    # Create a request to reach the limit
+    account_aid = "AID_EXPIRING_USAGE"
     serder = SimpleNamespace(
-        pre="AID_EXPIRING_USAGE",
+        pre=account_aid,
         ked={
             "r": "/account/witnesses",
-            "a": {
-                "account_aid": "AID_EXPIRING_USAGE",
-            },
+            "a": {"account_aid": account_aid},
         },
     )
 
-    store = Store(config.db_path, session_ttl_seconds=config.session_ttl_seconds)
+    first_store = Store(config.db_path, session_ttl_seconds=config.session_ttl_seconds)
     try:
-        # Create an account and save it
-        account = store.buildAccount(
-            account_aid="AID_EXPIRING_USAGE",
+        account = first_store.buildAccount(
+            account_aid=account_aid,
             account_alias="expiring",
             witness_profile_code="1-of-1",
             witness_count=1,
@@ -1704,20 +1701,25 @@ def test_account_is_set_to_expire_when_budget_fully_used(tmp_path, monkeypatch):
             tier="trial",
             onboarded=True,
         )
-        store.saveAccount(account)
-
-        limiter = Limiter(SimpleNamespace(config=config, store=store))
-        # Enforce the quotas on that request
-        limiter.enforceAccountQuotas(serder)
-        # Check the store for the account 
-        updated = store.getAccount("AID_EXPIRING_USAGE")
-        assert updated is not None
-        # Assert API usage changed to 1
-        assert updated.api_used == 1
-        # Assert the expiration date is immediate
-        assert updated.expires_at == "2026-01-01T00:00:00+00:00"
+        first_store.saveAccount(account)
+        Limiter(SimpleNamespace(config=config, store=first_store)).enforceAccountQuotas(serder)
     finally:
-        store.close()
+        first_store.close()
+
+    reopened_store = Store(config.db_path, session_ttl_seconds=config.session_ttl_seconds)
+    try:
+        persisted = reopened_store.getAccount(account_aid)
+        assert persisted is not None
+        assert persisted.api_used == 1
+
+        Limiter(SimpleNamespace(config=config, store=reopened_store)).enforceAccountQuotas(serder)
+
+        exhausted = reopened_store.getAccount(account_aid)
+        assert exhausted is not None
+        assert exhausted.api_used == 2
+        assert exhausted.expires_at == "2026-01-01T00:00:00+00:00"
+    finally:
+        reopened_store.close()
 
 
 def test_last_allowed_account_request_succeeds_before_budget_expiry(contract_factory, monkeypatch):

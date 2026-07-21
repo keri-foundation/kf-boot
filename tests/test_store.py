@@ -342,7 +342,6 @@ def test_past_due_sessions_are_not_treated_as_active(store):
     # Assert that workflow does not consider it active/valid
     assert store.findActiveSessionForEphemeral("E-stale") is None
     assert store.listActiveSessionsForIp("127.0.0.1") == []
-    assert store.listActiveSessionsForAlias("stale") == []
 
 
 def test_refreshAccountLease_extends_future_expiry_but_not_past_due_accounts(tmp_path):

@@ -69,8 +69,7 @@ ACCOUNT_QUOTA_ROUTES = {
 }
 
 
-# Account profile definitions are used to enforce per-tier limits and quotas.
-# Each profile maps a staging tier to a bootstrap code and runtime limits.
+# Account profile definitions map a staging tier to a bootstrap code and runtime quotas.
 @dataclass(frozen=True)
 class AccountProfile:
     """
@@ -79,7 +78,8 @@ class AccountProfile:
     Attributes:
     - tier: The staging tier (e.g. 'trial', 'org')
     - code: The bootstrap code (e.g. '1-of-1', '3-of-4')
-    - max_accounts: Maximum number of accounts allowed for this profile
+    - max_accounts: Deprecated account limit kept for configuration compatibility.
+      It is not enforced until kf-boot has an authenticated customer identifier.
     - max_requests_per_minute: Maximum number of requests per minute allowed for this profile
     - api_budget: Maximum number of API requests allowed for this profile
     """
@@ -121,15 +121,15 @@ def _default_account_profiles(codes: tuple[str, ...]) -> tuple[AccountProfile, .
     Generate default account profiles based on the supported bootstrap account options 
     if no explicit profiles are provided in the configuration.
     
-    It maps '1-of-1' to a 'trial' tier and '3-of-4' to an 'org' tier with predefined limits.
+    It maps '1-of-1' to a 'trial' tier and '3-of-4' to an 'org' tier with predefined quotas.
     
     Trial tier has:
-    - max_accounts=1 
+    - max_accounts=1 (deprecated compatibility value, not enforced)
     - max_requests_per_minute=30
     - api_budget=100
     
     Org tier has: 
-    - max_accounts=3
+    - max_accounts=3 (deprecated compatibility value, not enforced)
     - max_requests_per_minute=60
     - api_budget=200
     """

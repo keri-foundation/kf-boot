@@ -243,8 +243,6 @@ class SessionStartHandler(RouteHandler):
             self.exchanger.admitter.enforceSessionStartAdmission(
                 sender=sender,
                 account_aid=account_aid,
-                account_alias=alias,
-                profile=self.exchanger.ctx.config.account_profile(option["code"]),
             )
             session = self.exchanger.ctx.store.createSession(
                 ephemeral_aid=sender,

@@ -4,8 +4,6 @@ import falcon
 from typing import Any 
 
 from kfboot.basing import (
-    ACCOUNT_STATE_ONBOARDED,
-    ACCOUNT_STATE_PENDING_ONBOARDING,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
@@ -34,8 +32,6 @@ class Admitter:
         *,
         sender: str,
         account_aid: str,
-        account_alias: str,
-        profile: Any,
     ) -> None:
         client_ip = (self.exchanger.client_ip or "").strip()
         if not client_ip:
@@ -75,48 +71,6 @@ class Admitter:
                     f"principal(s); the configured limit is {aid_limit}."
                 ),
             )
-
-        # Check account alias limits when provided
-        if profile is not None and account_alias:
-            alias_accounts = self.ctx.store.listAccountsForAlias(account_alias)
-            # Count accounts that are pending onboarding or already onboarded
-            pending_and_onboarded = [
-                record
-                for record in alias_accounts
-                if record.status in {ACCOUNT_STATE_PENDING_ONBOARDING, ACCOUNT_STATE_ONBOARDED}
-            ]
-            # Add any active sessions for the alias
-            # Alias limits should continue to count stale sessions whose resources
-            # have not been cleaned yet. That keeps alias admission aligned with the
-            # real resource load instead of only the currently open session count.
-            active_alias_sessions = self.ctx.store.listAdmissionSessionsForAlias(account_alias)
-            active_alias_session_count = len(
-                [
-                    session
-                    for session in active_alias_sessions
-                    if session.account_aid not in {record.account_aid for record in alias_accounts}
-                ]
-            )
-            # The total alias usage is the sum of pending/onboarded accounts and active sessions
-            # this prevents a user from avoiding alias limits by starting multiple sessions with
-            # the same alias before fully onboarding an account that would enforce the alias limit
-            alias_usage = len(pending_and_onboarded) + active_alias_session_count
-
-            # Enforce the max accounts per alias limit
-            if profile.max_accounts > 0 and alias_usage >= profile.max_accounts:
-                logger.warning(
-                    f"Account creation rejected due to account alias usage limit exceeded for client IP {client_ip}"
-                    f" and account alias '{account_alias}'. Current limit is {profile.max_accounts} accounts per alias"
-                    f" for tier '{profile.tier}', and there are currently {alias_usage} pending/onboarded accounts and active sessions under this alias"
-                )
-                raise falcon.HTTPTooManyRequests(
-                    title="Account alias limit exceeded",
-                    description=(
-                        f"The account alias '{account_alias}' already has {alias_usage} account(s) in use; "
-                        f"the configured limit for tier '{profile.tier}' is {profile.max_accounts}."
-                    ),
-                )
-
 
     def reconcileExistingStartSession(
         self,

@@ -100,7 +100,7 @@ class Limiter:
             )
             return
 
-        # Enforce request rate and KEL budget for the account
+        # Enforce the request rate and fixed API budget for the account.
         self._enforceAccountRequestRate(account_aid, profile)
         self._enforceAccountApiBudgetLimit(account_aid, profile)
 
@@ -231,7 +231,7 @@ class Limiter:
         account = self.ctx.store.getAccount(account_aid)
         if account is None:
             logger.info(
-                "Account does not exist yet, skipping enforcing KEL budget"
+                "Account does not exist yet, skipping API budget enforcement"
             )
             return
 
@@ -242,7 +242,7 @@ class Limiter:
                 f"Account API budget exceeded for account {account_aid} under tier '{profile.tier}'",
             )
             raise falcon.HTTPTooManyRequests(
-                title="Account key event budget exceeded",
+                title="Account API budget exceeded",
                 description=(
                     f"Account {account_aid} exceeded {profile.api_budget} API requests. "
                     "Request quota has been exhausted for this account tier."
