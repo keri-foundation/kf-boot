@@ -9,8 +9,8 @@ from keri import help
 
 from kfboot.basing import QuotaRecord
 from kfboot.config import ACCOUNT_QUOTA_ROUTES, ONBOARDING_QUOTA_ROUTES
-from kfboot.utils import extractExnPayload, optionalStr
 from kfboot.store import nowIso
+from kfboot.utils import extractExnPayload, optionalStr
 
 logger = help.ogler.getLogger(__name__)
 

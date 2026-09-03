@@ -9,11 +9,12 @@ from keri import help
 from keri.kering import Kinds
 from keri.peer.exchanging import Exchanger
 
+from kfboot.admitting import Admitter
 from kfboot.basing import (
+    ACCOUNT_STATE_EXPIRED,
     ACCOUNT_STATE_FAILED,
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
-    ACCOUNT_STATE_EXPIRED,
     BOOT_OPERATION_ACCOUNT_DELETE,
     BOOT_OPERATION_FAILED,
     BOOT_OPERATION_PENDING,
@@ -21,24 +22,23 @@ from kfboot.basing import (
     BOOT_OPERATION_RUNNING,
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
-    AccountRecord,
     SESSION_STATE_ACCOUNT_CREATED,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
     TERMINAL_SESSION_STATES,
+    AccountRecord,
     SessionRecord,
 )
+from kfboot.expiring import Expirer
+from kfboot.limiting import Limiter
+from kfboot.provisioning import Provisioner
 from kfboot.store import (
     accountFailed,
     nowIso,
     resourcesToApi,
 )
-from kfboot.limiting import Limiter
-from kfboot.admitting import Admitter
-from kfboot.provisioning import Provisioner
-from kfboot.expiring import Expirer
 from kfboot.utils import extractExnPayload, optionalStr, requiredStr
 
 logger = help.ogler.getLogger(__name__)
@@ -61,7 +61,7 @@ class RouteHandlerError(RuntimeError):
 class RouteHandler:
     resource: str = ""
 
-    def __init__(self, exchanger: "BootExchanger"):
+    def __init__(self, exchanger: BootExchanger):
         self.exchanger = exchanger
 
     def verify(self, serder, **kwa) -> bool:
@@ -1338,5 +1338,5 @@ class BootExchanger(Exchanger):
                 title="Route handler failed",
                 description="The boot service could not process this route.",
             )
-            logger.exception("Exchange route handler failed: %s", exc)
+            logger.exception("Exchange route handler failed: %s", exc)  # noqa: TRY401
             return None

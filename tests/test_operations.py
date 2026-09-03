@@ -23,7 +23,15 @@ from kfboot.operating import BootOperationDoer
 from kfboot.runtime import build_doers
 from kfboot.store import Store
 
-from .support import assert_reply_frame, build_exn, drain_do, make_config, post_cesr, register_aid, start_session
+from .support import (
+    assert_reply_frame,
+    build_exn,
+    drain_do,
+    make_config,
+    post_cesr,
+    register_aid,
+    start_session,
+)
 
 
 @pytest.fixture

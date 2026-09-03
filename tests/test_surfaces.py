@@ -14,8 +14,8 @@ from kfboot.onboarding import _clientIp
 from .support import (
     build_exn,
     build_signed_serder,
-    make_witness_backends,
     make_config,
+    make_witness_backends,
     post_cesr,
     register_aid,
     split_cesr_message,

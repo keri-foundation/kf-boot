@@ -1,4 +1,3 @@
-# -*- encoding: utf-8 -*-
 """
 kfboot.basing module
 
@@ -10,7 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from keri.db import dbing, koming
-
 
 SESSION_STATE_STARTED = "started"
 SESSION_STATE_WITNESS_POOL_ALLOCATED = "witness_pool_allocated"

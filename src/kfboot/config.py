@@ -451,7 +451,7 @@ class Config:
         return {"path": self.account_path, "url": self.account_public_url}
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         host = _env("HOST", "127.0.0.1")
         port = int(_env("PORT", "9723"))
         onboarding_path = _env("ONBOARDING_PATH", "/onboarding").rstrip("/") or "/onboarding"

@@ -9,12 +9,12 @@ from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import exchange
 from keri.core.serdering import SerderKERI
 from keri.kering import Kinds, Vrsn_2_0
-from kfboot.store import Store, makeRecord
-from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
 
+from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
 from kfboot.boot_client import BootError
 from kfboot.config import Config, WitnessBackend
 from kfboot.operating import BootOperationDoer, BootOperationProcessor
+from kfboot.store import Store, makeRecord
 
 
 class FakeWitnessBoot:
@@ -298,9 +298,7 @@ def make_config(tmp_path, *, index: int = 0, **overrides: Any) -> Config:
 
 
 def freeze_boot_time(monkeypatch, current: datetime):
-    import kfboot.expiring as expiring
-    import kfboot.limiting as limiting
-    import kfboot.store as store
+    from kfboot import expiring, limiting, store
     
     class FrozenDateTime:
         value = current

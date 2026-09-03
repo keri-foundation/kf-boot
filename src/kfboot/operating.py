@@ -211,9 +211,7 @@ class BootOperationDoer(doing.DoDoer):
                 retryable = True
                 if self.failure_max_attempts > 0 and operation.attempt_count >= self.failure_max_attempts:
                     retryable = False
-                elif exc.status_code is None:
-                    retryable = True
-                elif exc.status_code >= 500:
+                elif exc.status_code is None or exc.status_code >= 500:
                     retryable = True
                 else:
                     retryable = exc.status_code in {408, 425, 429}

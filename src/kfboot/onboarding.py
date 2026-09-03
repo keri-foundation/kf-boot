@@ -16,7 +16,6 @@ from keri.kering import (
 
 from kfboot.config import ACCOUNT_ROUTES, ONBOARDING_ROUTES
 
-
 EVENT_ILKS = {Ilks.icp, Ilks.rot, Ilks.ixn, Ilks.dip, Ilks.drt}
 ACCEPTED_CESR_CONTENT_TYPES = {CESR_CONTENT_TYPE, "application/cesr+json"}
 logger = help.ogler.getLogger(__name__)
@@ -38,7 +37,7 @@ class CesrSurfaceEnd:
         serder = serdering.SerderKERI(sad=cr.payload)
         route = str(serder.ked.get("r", "") or "")
         logger.info(
-            f"CESR request received: ilk={str(serder.ilk)}\n"
+            f"CESR request received: ilk={serder.ilk!s}\n"
             f"route={route}\n"
             f"sender_aid={serder.pre}\n"
             f"surface={self.surface}"

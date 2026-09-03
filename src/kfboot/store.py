@@ -1,35 +1,31 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import os
 import secrets
+from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlsplit
 
 from kfboot.basing import (
+    ACCOUNT_STATE_EXPIRED,
+    ACCOUNT_STATE_FAILED,
+    ACCOUNT_STATE_ONBOARDED,
+    ACCOUNT_STATE_PENDING_ONBOARDING,
+    ACTIVE_BOOT_OPERATION_STATES,
+    BOOT_OPERATION_FAILED,
+    BOOT_OPERATION_PENDING,
+    BOOT_OPERATION_RUNNING,
+    BOOT_OPERATION_SESSION_PROVISION,
+    BOOT_OPERATION_SUCCEEDED,
     CLEANUP_TASK_ACCOUNT_CLEANUP,
     CLEANUP_TASK_ACCOUNT_DELETE,
     CLEANUP_TASK_ACCOUNT_EXPIRE,
     CLEANUP_TASK_SESSION_CLEANUP,
     CLEANUP_TASK_SESSION_DELETE,
     CLEANUP_TASK_SESSION_EXPIRE,
-    ACTIVE_BOOT_OPERATION_STATES,
-    ACCOUNT_STATE_FAILED,
-    ACCOUNT_STATE_EXPIRED,
-    ACCOUNT_STATE_ONBOARDED,
-    ACCOUNT_STATE_PENDING_ONBOARDING,
-    BOOT_OPERATION_FAILED,
-    BOOT_OPERATION_PENDING,
-    BOOT_OPERATION_RUNNING,
-    BOOT_OPERATION_SESSION_PROVISION,
-    BOOT_OPERATION_SUCCEEDED,
-    BootOperationDueRecord,
-    BootOperationRecord,
-    CleanupAdminActionRecord,
-    CleanupDueRecord,
-    CleanupTaskRecord,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
@@ -37,8 +33,13 @@ from kfboot.basing import (
     TERMINAL_SESSION_STATES,
     AccountRecord,
     BindingRecord,
-    ResourceRecord,
+    BootOperationDueRecord,
+    BootOperationRecord,
+    CleanupAdminActionRecord,
+    CleanupDueRecord,
+    CleanupTaskRecord,
     QuotaRecord,
+    ResourceRecord,
     SessionRecord,
     open_baser,
 )
@@ -67,7 +68,7 @@ def _copyOperationDict(value: dict[str, Any] | None) -> dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise ValueError("Operation payload and result values must be dictionaries.")
+        raise ValueError("Operation payload and result values must be dictionaries.")  # noqa: TRY004
     return deepcopy(value)
 
 

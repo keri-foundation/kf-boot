@@ -222,9 +222,7 @@ class Expirer:
             f"Session {session.session_id} failed: {reason}",
         )
 
-        if account is None:
-            failed = None
-        elif account.status == ACCOUNT_STATE_ONBOARDED:
+        if account is None or account.status == ACCOUNT_STATE_ONBOARDED:
             failed = None
         else:
             failed = accountFailed(account)
@@ -466,9 +464,7 @@ class Expirer:
         session.updated_at = now
         self.ctx.store.saveSession(session)
 
-        if account is None:
-            failed = None
-        elif account.status == ACCOUNT_STATE_ONBOARDED:
+        if account is None or account.status == ACCOUNT_STATE_ONBOARDED:
             failed = None
         else:
             failed = accountFailed(account)

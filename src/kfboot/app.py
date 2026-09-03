@@ -17,7 +17,6 @@ from kfboot.onboarding import CesrSurfaceEnd
 from kfboot.store import Store, nowIso
 from kfboot.sweeping import CleanupState
 
-
 logger = help.ogler.getLogger(__name__)
 
 DEFAULT_KRAM_CONFIG = {

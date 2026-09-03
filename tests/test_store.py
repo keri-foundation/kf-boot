@@ -5,18 +5,18 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from kfboot.basing import (
-    ACCOUNT_STATE_FAILED,
     ACCOUNT_STATE_EXPIRED,
+    ACCOUNT_STATE_FAILED,
     ACCOUNT_STATE_ONBOARDED,
     CLEANUP_TASK_ACCOUNT_CLEANUP,
     CLEANUP_TASK_ACCOUNT_DELETE,
     CLEANUP_TASK_SESSION_CLEANUP,
     CLEANUP_TASK_SESSION_DELETE,
     CLEANUP_TASK_SESSION_EXPIRE,
-    QuotaRecord,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
+    QuotaRecord,
     SessionRecord,
 )
 from kfboot.store import (
