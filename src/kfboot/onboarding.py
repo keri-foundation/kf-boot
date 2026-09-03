@@ -67,6 +67,7 @@ class CesrSurfaceEnd:
                 exc=self.ctx.exchanger,
                 local=False,
                 version=serder.pvrsn,
+                piped=True,
             )
         except falcon.HTTPError:
             raise
