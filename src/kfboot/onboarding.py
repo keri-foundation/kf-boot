@@ -63,7 +63,16 @@ class CesrSurfaceEnd:
         self.ctx.exchanger.clearReplies()
 
         try:
-            self.ctx.parser.parseOne(ims=msg, exc=self.ctx.exchanger, local=False)
+            # The attachment counter is versioned independently of the JSON
+            # body.  Passing the event's declared protocol version is required
+            # for a V2 pipelined controller-plus-witness replay to be consumed
+            # as one message rather than leaving the witness group pending.
+            self.ctx.parser.parseOne(
+                ims=msg,
+                exc=self.ctx.exchanger,
+                local=False,
+                version=serder.pvrsn,
+            )
         except falcon.HTTPError:
             raise
         except (MissingAuthAttachmentError, MissingSenderKeyStateError, MissingSignatureError) as exc:
