@@ -1,10 +1,10 @@
 # provisioning.py
 from __future__ import annotations
 
-import falcon
 from hashlib import blake2b
 from typing import Any
 
+import falcon
 from keri import help
 
 from kfboot.basing import (
@@ -15,7 +15,6 @@ from kfboot.basing import (
     TERMINAL_SESSION_STATES,
     SessionRecord,
 )
-
 from kfboot.boot_client import BootError
 from kfboot.store import (
     makeRecord,

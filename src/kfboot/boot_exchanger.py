@@ -6,14 +6,15 @@ from typing import Any
 
 import falcon
 from keri import help
-from keri.kering import Vrsn_1_0
+from keri.kering import Kinds
 from keri.peer.exchanging import Exchanger
 
+from kfboot.admitting import Admitter
 from kfboot.basing import (
+    ACCOUNT_STATE_EXPIRED,
     ACCOUNT_STATE_FAILED,
     ACCOUNT_STATE_ONBOARDED,
     ACCOUNT_STATE_PENDING_ONBOARDING,
-    ACCOUNT_STATE_EXPIRED,
     BOOT_OPERATION_ACCOUNT_DELETE,
     BOOT_OPERATION_FAILED,
     BOOT_OPERATION_PENDING,
@@ -21,24 +22,23 @@ from kfboot.basing import (
     BOOT_OPERATION_RUNNING,
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
-    AccountRecord,
     SESSION_STATE_ACCOUNT_CREATED,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_COMPLETED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
     TERMINAL_SESSION_STATES,
+    AccountRecord,
     SessionRecord,
 )
+from kfboot.expiring import Expirer
+from kfboot.limiting import Limiter
+from kfboot.provisioning import Provisioner
 from kfboot.store import (
     accountFailed,
     nowIso,
     resourcesToApi,
 )
-from kfboot.limiting import Limiter
-from kfboot.admitting import Admitter
-from kfboot.provisioning import Provisioner
-from kfboot.expiring import Expirer
 from kfboot.utils import extractExnPayload, optionalStr, requiredStr
 
 logger = help.ogler.getLogger(__name__)
@@ -61,7 +61,7 @@ class RouteHandlerError(RuntimeError):
 class RouteHandler:
     resource: str = ""
 
-    def __init__(self, exchanger: "BootExchanger"):
+    def __init__(self, exchanger: BootExchanger):
         self.exchanger = exchanger
 
     def verify(self, serder, **kwa) -> bool:
@@ -243,8 +243,6 @@ class SessionStartHandler(RouteHandler):
             self.exchanger.admitter.enforceSessionStartAdmission(
                 sender=sender,
                 account_aid=account_aid,
-                account_alias=alias,
-                profile=self.exchanger.ctx.config.account_profile(option["code"]),
             )
             session = self.exchanger.ctx.store.createSession(
                 ephemeral_aid=sender,
@@ -279,8 +277,11 @@ class SessionStatusHandler(RouteHandler):
         sender = serder.pre
         session = self.exchanger.requireSession(requiredStr(extractExnPayload(serder), "session_id"))
         self.exchanger.requireOnboardingPrincipal(sender=sender, session=session)
-        self.exchanger.requireOpenSession(session)
-        self.exchanger.expirer.refreshSessionLease(session)
+        if session.state not in TERMINAL_SESSION_STATES:
+            if self.exchanger.sessionPastDue(session):
+                self.exchanger.expirer.markSessionExpired(session)
+            else:
+                self.exchanger.expirer.refreshSessionLease(session)
         logger.info(
             f"Session status requested for session {session.session_id}"
             f" from sender {sender}"
@@ -1295,19 +1296,30 @@ class BootExchanger(Exchanger):
         return operations[0] if operations else None
 
     def queueReply(self, route: str, receiver: str, payload: dict[str, Any]) -> None:
-        stream = bytearray(self.host_hab.replay())
+        stream = self.hostKELReplay()
+        pvrsn = self.host_hab.kever.serder.pvrsn
         stream.extend(
             self.host_hab.exchange(
                 route=route,
                 attributes=payload,
                 receiver=receiver or "",
-                gvrsn=Vrsn_1_0,
+                version=pvrsn,
+                pvrsn=pvrsn,
+                gvrsn=pvrsn,
+                kind=Kinds.json,
             )
         )
         self.reply_streams.append(bytes(stream))
         logger.debug(
             f"Reply queued for route {route} to receiver {receiver}",
         )
+
+    def hostKELReplay(self) -> bytearray:
+        pvrsn = self.host_hab.kever.serder.pvrsn
+        stream = bytearray()
+        for sn in range(self.host_hab.kever.sn + 1):
+            stream.extend(self.host_hab.msgOwnEvent(sn=sn, gvrsn=pvrsn))
+        return stream
 
     def processEvent(self, serder, tsgs=None, cigars=None, ptds=None, essrs=None, **kwa):
         try:
@@ -1326,5 +1338,5 @@ class BootExchanger(Exchanger):
                 title="Route handler failed",
                 description="The boot service could not process this route.",
             )
-            logger.exception("Exchange route handler failed: %s", exc)
+            logger.exception("Exchange route handler failed: %s", exc)  # noqa: TRY401
             return None

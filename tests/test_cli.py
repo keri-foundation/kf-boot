@@ -10,11 +10,13 @@ from kfboot.basing import (
     SESSION_STATE_EXPIRED,
 )
 from kfboot.store import Store
+
 from .support import (
     makeBlockedOrphanTask,
     makeBlockedOrphanTaskWithResource,
     makeBlockedTask,
 )
+
 
 def test_cli_blocked_list_prints_summary(tmp_path, capsys):
     """Test for the cleanup block list command"""

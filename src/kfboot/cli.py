@@ -17,6 +17,7 @@ from kfboot.basing import (
     CLEANUP_TASK_SESSION_EXPIRE,
     CleanupTaskRecord,
 )
+from kfboot.runtime import setup
 from kfboot.store import (
     BlockedTaskDismissAssessment,
     CleanupTaskNotBlockedError,
@@ -27,7 +28,6 @@ from kfboot.store import (
     UnsafeBlockedTaskDismissError,
     nowIso,
 )
-from kfboot.runtime import setup
 
 logger = help.ogler.getLogger(__name__)
 
@@ -77,9 +77,8 @@ def configure_logging(level: int = logging.INFO) -> None:
 
     # Ensure any previously-created logger objects are not stuck at CRITICAL.
     for existing_logger in logging.Logger.manager.loggerDict.values():
-        if isinstance(existing_logger, logging.Logger):
-            if existing_logger.level > level:
-                existing_logger.setLevel(level)
+        if isinstance(existing_logger, logging.Logger) and existing_logger.level > level:
+            existing_logger.setLevel(level)
 
     # If the KERI logger helper exposes a level setter, apply it too.
     try:
@@ -89,7 +88,7 @@ def configure_logging(level: int = logging.INFO) -> None:
             help.ogler.setLevel(level)
         elif hasattr(help.ogler, "setLogLevel"):
             help.ogler.setLogLevel(level)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
 

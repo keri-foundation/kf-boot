@@ -53,6 +53,14 @@ jobs:
         with:
           python-version: '3.14'
 
+      - name: Use runner temp drive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          "TMPDIR=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TEMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+          "TMP=$env:RUNNER_TEMP" >> $env:GITHUB_ENV
+
       - name: Install libsodium (macOS)
         if: runner.os == 'macOS'
         run: |

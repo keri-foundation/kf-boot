@@ -8,12 +8,13 @@ from falcon import testing
 from keri.app.httping import CESR_ATTACHMENT_HEADER, CESR_CONTENT_TYPE
 from keri.core import exchange
 from keri.core.serdering import SerderKERI
-from kfboot.store import Store, makeRecord
-from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
+from keri.kering import Kinds, Vrsn_2_0
 
+from kfboot.basing import CLEANUP_TASK_SESSION_CLEANUP, CLEANUP_TASK_SESSION_EXPIRE
 from kfboot.boot_client import BootError
 from kfboot.config import Config, WitnessBackend
 from kfboot.operating import BootOperationDoer, BootOperationProcessor
+from kfboot.store import Store, makeRecord
 
 
 class FakeWitnessBoot:
@@ -297,9 +298,7 @@ def make_config(tmp_path, *, index: int = 0, **overrides: Any) -> Config:
 
 
 def freeze_boot_time(monkeypatch, current: datetime):
-    import kfboot.expiring as expiring
-    import kfboot.limiting as limiting
-    import kfboot.store as store
+    from kfboot import expiring, limiting, store
     
     class FrozenDateTime:
         value = current
@@ -360,7 +359,15 @@ def build_signed_serder(hab, serder: SerderKERI, *, end: bytes | bytearray = b""
 
 
 def build_exn(hab, *, route: str, payload: dict[str, Any]) -> bytes:
-    serder = exchange(sender=hab.pre, route=route, attributes=payload)
+    serder = exchange(
+        sender=hab.pre,
+        route=route,
+        attributes=payload,
+        version=Vrsn_2_0,
+        pvrsn=Vrsn_2_0,
+        gvrsn=Vrsn_2_0,
+        kind=Kinds.json,
+    )
     return build_signed_serder(hab, serder)
 
 
@@ -404,7 +411,7 @@ def parse_reply_stream(stream: bytes | bytearray) -> tuple[list[SerderKERI], Ser
 def assert_reply_frame(client: testing.TestClient, response, *, route: str) -> tuple[list[SerderKERI], SerderKERI]:
     assert response.status_code == 200
     assert response.content_type == CESR_CONTENT_TYPE
-    assert response.content.startswith(client.ctx.host_hab.replay())
+    assert response.content.startswith(client.ctx.exchanger.hostKELReplay())
     serders, reply = parse_reply_stream(response.content)
     assert len(serders) >= 2
     assert reply.ked["r"] == route

@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from hio.base import doing
 
 from kfboot.app import create_app

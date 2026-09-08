@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 import falcon
 
 from kfboot.boot_client import BootError
