@@ -15,6 +15,7 @@ kf-boot requires Python ``>=3.14.0`` and ``libsodium``.
 .. code-block:: bash
 
    brew install libsodium
+   export DYLD_LIBRARY_PATH="$(brew --prefix libsodium)/lib:${DYLD_LIBRARY_PATH:-}"
 
 **Ubuntu/Debian:**
 
@@ -25,14 +26,13 @@ kf-boot requires Python ``>=3.14.0`` and ``libsodium``.
 Setup
 -----
 
-From the repository root:
+Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_, then run
+from the repository root:
 
 .. code-block:: bash
 
-   python3.14 -m venv .venv
+   uv sync --locked --extra dev
    source .venv/bin/activate
-   python -m pip install -U pip setuptools wheel
-   python -m pip install -e ".[dev]"
 
 Running the Boot Service
 ------------------------
@@ -192,8 +192,7 @@ Testing
 
 .. code-block:: bash
 
-   pip install -e ".[dev]"
-   pytest tests/
+   uv run --locked --extra dev pytest tests/
 
 Tests use Falcon's ``TestClient`` for in-process HTTP testing with fake
 witness and watcher boot backends. No external services are required.
@@ -224,7 +223,7 @@ Troubleshooting
     ``sudo apt-get install libsodium-dev`` (Ubuntu/Debian).
 
 **ModuleNotFoundError: No module named 'kfboot'**
-    Install the package in development mode: ``pip install -e .`` from the
+    Install the package in development mode: ``uv sync --locked --extra dev`` from the
     repository root.
 
 Building the Docs
@@ -234,8 +233,7 @@ From the repository root:
 
 .. code-block:: bash
 
-   pip install -e .
-   pip install sphinx sphinx-rtd-theme
+   uv pip install -r docs/requirements.txt
    cd docs
    sphinx-build -b dirhtml . _build/html
 
