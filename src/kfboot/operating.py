@@ -9,11 +9,14 @@ from keri import help
 
 from kfboot.basing import (
     BOOT_OPERATION_ACCOUNT_DELETE,
+    BOOT_OPERATION_MAILBOX_CREATE,
+    BOOT_OPERATION_MAILBOX_DELETE,
     BOOT_OPERATION_RESOURCE_DELETE,
     BOOT_OPERATION_SESSION_PROVISION,
     BOOT_OPERATION_WATCHER_STATUS_QUERY,
 )
 from kfboot.boot_client import BootError
+from kfboot.mailboxing import mailboxPayload
 from kfboot.store import nowIso
 
 logger = help.ogler.getLogger(__name__)
@@ -23,7 +26,25 @@ logger = help.ogler.getLogger(__name__)
 class BootOperationProcessor:
     provisioner: Any
 
+    mailbox_boot: Any = None
+
     def processBootOperationDo(self, *, operation, witness_boots, watcher_boot, tymth, tock: float = 0.0):
+        if operation.kind in {BOOT_OPERATION_MAILBOX_CREATE, BOOT_OPERATION_MAILBOX_DELETE}:
+            record = self.provisioner.ctx.store.mailboxes.require(
+                operation.subject, account_aid=operation.requester,
+                mailbox_id=operation.payload["mailbox_id"],
+            )
+            if operation.kind == BOOT_OPERATION_MAILBOX_CREATE:
+                yield from self.provisioner.allocateMailboxDo(
+                    record, mailbox_boot=self.mailbox_boot, tymth=tymth, tock=tock,
+                )
+            else:
+                yield from self.provisioner.deleteMailboxDo(
+                    record, mailbox_boot=self.mailbox_boot, tymth=tymth, tock=tock,
+                )
+            record = self.provisioner.ctx.store.mailboxes.get(operation.subject)
+            return {"mailbox": mailboxPayload(self.provisioner.ctx, record)}
+
         if operation.kind == BOOT_OPERATION_SESSION_PROVISION:
             session_id = str(operation.payload.get("session_id") or operation.subject)
             session = self.provisioner.ctx.store.getSession(session_id)
@@ -111,6 +132,7 @@ class BootOperationProcessor:
                 account=account,
                 witness_boots=witness_boots,
                 watcher_boot=watcher_boot,
+                mailbox_boot=self.mailbox_boot,
                 tymth=tymth,
                 tock=tock,
             )
