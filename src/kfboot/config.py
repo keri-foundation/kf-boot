@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from keri import help
 
@@ -50,6 +51,9 @@ ONBOARDING_QUOTA_ROUTES = {
 }
 
 ACCOUNT_ROUTES = {
+    "/account/mailboxes",
+    "/account/mailboxes/create",
+    "/account/mailboxes/delete",
     "/operations/status",
     "/account/witnesses",
     "/account/watchers",
@@ -60,6 +64,9 @@ ACCOUNT_ROUTES = {
 }
 
 ACCOUNT_QUOTA_ROUTES = {
+    "/account/mailboxes",
+    "/account/mailboxes/create",
+    "/account/mailboxes/delete",
     "/account/witnesses",
     "/account/watchers",
     "/account/watchers/status",
@@ -283,8 +290,18 @@ class Config:
     cleanup_block_after_failure_age_seconds: float = 86400.0
     # Retention delay after account cleanup before final account deletion is allowed
     expired_account_retention_seconds: float = 0.0
+    mbx_boot_url: str = "http://127.0.0.1:6731"
+    mailbox_limit_per_account: int = 10
 
     def __post_init__(self) -> None:
+        if self.mailbox_limit_per_account <= 0:
+            raise ValueError("mailbox_limit_per_account must be greater than 0.")
+        mailbox_boot = urlsplit(self.mbx_boot_url)
+        if (mailbox_boot.scheme not in {"http", "https"} or not mailbox_boot.netloc
+                or mailbox_boot.path not in {"", "/"} or mailbox_boot.query or mailbox_boot.fragment
+                or mailbox_boot.username or mailbox_boot.password):
+            raise ValueError("mbx_boot_url must be an HTTP(S) service root.")
+        object.__setattr__(self, "mbx_boot_url", _normalize_url(self.mbx_boot_url))
         if self.bootstrap_api_requests_per_minute < 0:
             raise ValueError("bootstrap_api_requests_per_minute must be greater than or equal to 0.")
         if self.session_ttl_seconds <= 0:
@@ -515,6 +532,8 @@ class Config:
             account_ttl_seconds=float(
                 _env("ACCOUNT_TTL_SECONDS", "172800")  # 48 hours
             ),
+            mbx_boot_url=_env("MBX_BOOT_URL", "http://127.0.0.1:6731").rstrip("/"),
+            mailbox_limit_per_account=int(_env("MAILBOX_LIMIT_PER_ACCOUNT", "10")),
             closed_session_retention_seconds=(
                 float(closed_session_retention_env)
                 if closed_session_retention_env is not None

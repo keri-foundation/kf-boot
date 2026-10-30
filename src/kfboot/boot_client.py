@@ -64,6 +64,15 @@ class HioBootClient:
         )
         return _responseJson(response)
 
+    def allocateMailboxDo(self, recipient_aid: str, *, tymth, tock: float = 0.0):
+        response = yield from self._requestDo(
+            "POST", "/mailboxes", json={"aid": recipient_aid}, tymth=tymth, tock=tock,
+        )
+        return _responseJson(response)
+
+    def deleteMailboxDo(self, recipient_aid: str, *, tymth, tock: float = 0.0):
+        yield from self._emptyDo("DELETE", f"/mailboxes/{recipient_aid}", tymth=tymth, tock=tock)
+
     def watcherStatusDo(self, eid: str, *, tymth, tock: float = 0.0):
         response = yield from self._requestDo(
             "GET",

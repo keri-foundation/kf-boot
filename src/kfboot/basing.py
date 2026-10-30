@@ -32,6 +32,8 @@ CLEANUP_TASK_ACCOUNT_DELETE = "account_delete"
 
 BOOT_OPERATION_SESSION_PROVISION = "session_provision"
 BOOT_OPERATION_WATCHER_STATUS_QUERY = "watcher_status_query"
+BOOT_OPERATION_MAILBOX_CREATE = "mailbox_create"
+BOOT_OPERATION_MAILBOX_DELETE = "mailbox_delete"
 BOOT_OPERATION_RESOURCE_DELETE = "resource_delete"
 BOOT_OPERATION_ACCOUNT_DELETE = "account_delete"
 
@@ -78,6 +80,19 @@ class ResourceRecord:
 class BindingRecord:
     principal: str = ""
     cid: str = ""
+
+
+@dataclass
+class MailboxRecord:
+    mailbox_id: str = ""
+    recipient_aid: str = ""
+    account_aid: str = ""
+    status: str = "active"
+    binding_said: str = ""
+    deleted_at: str = ""
+    eid: str = ""
+    url: str = ""
+    oobis: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -292,6 +307,8 @@ class PlatformBaser(dbing.LMDBer):
             subkey="bdue.",
             klas=BootOperationDueRecord,
         )
+        # Account allocation metadata; queue payloads belong to the provider.
+        self.mailboxes = koming.Komer(db=self, subkey="mbxs.", klas=MailboxRecord)
         return self.env
 
 

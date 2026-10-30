@@ -17,6 +17,8 @@ from kfboot.basing import (
     ACCOUNT_STATE_PENDING_ONBOARDING,
     BOOT_OPERATION_ACCOUNT_DELETE,
     BOOT_OPERATION_FAILED,
+    BOOT_OPERATION_MAILBOX_CREATE,
+    BOOT_OPERATION_MAILBOX_DELETE,
     BOOT_OPERATION_PENDING,
     BOOT_OPERATION_RESOURCE_DELETE,
     BOOT_OPERATION_RUNNING,
@@ -33,6 +35,7 @@ from kfboot.basing import (
 )
 from kfboot.expiring import Expirer
 from kfboot.limiting import Limiter
+from kfboot.mailboxing import mailboxPayload, validateBinding
 from kfboot.provisioning import Provisioner
 from kfboot.store import (
     accountFailed,
@@ -514,6 +517,73 @@ class CancelHandler(RouteHandler):
         self.exchanger.replySession(self.resource, receiver=sender, session=session)
 
 
+class AccountMailboxesHandler(RouteHandler):
+    resource = "/account/mailboxes"
+
+    def verifyEvent(self, serder, **kwa) -> bool:
+        self.exchanger.requireOnboardedAccount(serder.pre, extractExnPayload(serder))
+        self.exchanger.requireNoAccountDeletePending(serder.pre)
+        self.exchanger.limiter.precheckAccountQuotas(serder)
+        return True
+
+    def handleEvent(self, serder, **kwa):
+        rows = self.exchanger.ctx.store.mailboxes.list(serder.pre)
+        self.reply(serder, {"mailboxes": [mailboxPayload(row) for row in rows]})
+
+    def reply(self, serder, payload):
+        account = self.exchanger.requireOnboardedAccount(serder.pre, {})
+        self.exchanger.expirer.refreshAccountLease(account)
+        self.exchanger.limiter.recordSuccessfulAccountQuotaUse(serder)
+        self.exchanger.queueReply(self.resource, serder.pre,
+                                 {"request_said": serder.said, **payload})
+
+
+class AccountMailboxCreateHandler(AccountMailboxesHandler):
+    resource = "/account/mailboxes/create"
+
+    def handleEvent(self, serder, **kwa):
+        payload = dict(extractExnPayload(serder))
+        payload["account_aid"] = serder.pre
+        recipient = requiredStr(payload, "recipient_aid")
+        binding = validateBinding(self.exchanger.ctx, payload)
+        record = self.exchanger.ctx.store.mailboxes.create(
+            account_aid=serder.pre, recipient_aid=recipient, binding=binding,
+            limit=self.exchanger.ctx.config.mailbox_limit_per_account,
+        )
+        payload = {"mailbox": mailboxPayload(record)}
+        if record.status != "active":
+            operation = self.exchanger.ctx.store.ensureBootOperation(
+                kind=BOOT_OPERATION_MAILBOX_CREATE, subject=recipient, requester=serder.pre,
+                route=self.resource, payload={"mailbox_id": record.mailbox_id},
+            )
+            payload["operation"] = self.exchanger.ctx.store.bootOperationPayload(operation)
+        self.reply(serder, payload)
+
+
+class AccountMailboxDeleteHandler(AccountMailboxesHandler):
+    resource = "/account/mailboxes/delete"
+
+    def handleEvent(self, serder, **kwa):
+        payload = extractExnPayload(serder)
+        record = self.exchanger.ctx.store.mailboxes.require(
+            requiredStr(payload, "recipient_aid"), account_aid=serder.pre,
+            mailbox_id=requiredStr(payload, "mailbox_id"),
+        )
+        operation = None
+        if record.status != "deleted":
+            record.status = "deleting"
+            self.exchanger.ctx.store.mailboxes.save(record)
+            operation = self.exchanger.ctx.store.ensureBootOperation(
+                kind=BOOT_OPERATION_MAILBOX_DELETE, subject=record.recipient_aid, requester=serder.pre,
+                route=self.resource, payload={"mailbox_id": record.mailbox_id},
+            )
+        # Report the state the request produced, not the state it replaced.
+        result = {"mailbox": mailboxPayload(record)}
+        if operation is not None:
+            result["operation"] = self.exchanger.ctx.store.bootOperationPayload(operation)
+        self.reply(serder, result)
+
+
 class AccountWitnessesHandler(RouteHandler):
     resource = "/account/witnesses"
 
@@ -854,7 +924,7 @@ class OperationStatusHandler(RouteHandler):
         self.exchanger.queueReply(
             self.resource,
             sender,
-            {"operation": self.exchanger.ctx.store.bootOperationPayload(operation)},
+            {"request_said": serder.said, "operation": self.exchanger.ctx.store.bootOperationPayload(operation)},
         )
 
 
@@ -872,6 +942,9 @@ class BootExchanger(Exchanger):
         self.expirer = Expirer(ctx, self.provisioner)
 
         handlers = (
+            AccountMailboxesHandler(self),
+            AccountMailboxCreateHandler(self),
+            AccountMailboxDeleteHandler(self),
             SessionStartHandler(self),
             SessionStatusHandler(self),
             AccountCreateHandler(self),

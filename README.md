@@ -1,6 +1,7 @@
 # kf-boot
 
-`kf-boot` is the KERI Foundation boot service for hosted witness and watcher onboarding.
+`kf-boot` provides KERI Foundation account onboarding, hosted witnesses and watchers,
+and account-owned registrations on the standalone `kf-mailbox` provider.
 
 This repository implements the boot service contract shared with `locksmith`.
 Keep the implementation, README contract, and client integration aligned.
@@ -43,6 +44,7 @@ This will work if witness and watcher services are running on the same machine.
 - onboarding session metadata
 - account metadata
 - hosted witness and watcher allocation through local boot APIs
+- authenticated mailbox allocation metadata, recipient consent, and provider cleanup
 
 `kf-boot` does not own:
 
@@ -55,12 +57,12 @@ This will work if witness and watcher services are running on the same machine.
 
 ## Public Surfaces
 
-The contract has two public trust domains:
+The service has two public trust domains:
 
 - onboarding surface: ephemeral first contact and onboarding
 - approved-account surface: management for already onboarded accounts
 
-This implementation keeps one codebase, but the public interface still models two surfaces:
+One service exposes these routes:
 
 - onboarding CESR ingress: `POST /onboarding`
 - approved-account CESR ingress: `POST /account`
@@ -76,7 +78,7 @@ Discovery remains plain JSON:
 
 Public discovery is plain HTTPS JSON.
 
-All authenticated business routes use:
+Onboarding and account routes use:
 
 - CESR-over-HTTP
 - KRAM
@@ -88,6 +90,7 @@ Auth principals:
 
 - onboarding routes are authenticated by the hidden ephemeral onboarding AID
 - approved-account routes are authenticated by the permanent account AID
+- account ownership manages mailbox registration; message transport belongs to `kf-mailbox`
 
 First-contact rule:
 
@@ -121,10 +124,71 @@ Approved-account routes:
 - `exn /account/delete`
 - `exn /account/witnesses/delete`
 - `exn /account/watchers/delete`
+- `exn /account/mailboxes`
+- `exn /account/mailboxes/create`
+- `exn /account/mailboxes/delete`
 - `exn /operations/status`
 
 There is no JSON bearer-session flow for these routes.
-There are no authenticated `qry` routes in this slice.
+
+## Credential Mailboxes
+
+`kf-boot` provisions registrations on the separate `kf-mailbox` process. It does
+not receive, store, poll, expire, or delete message payloads.
+
+Introduce the recipient KEL on `/account`. Send `/account/mailboxes/create`
+signed by the owning account with `{account_aid, recipient_aid, binding}`.
+The binding remains a recipient-signed V2 `/mailbox/bind` addressed to Boot,
+with `{account_aid, recipient_aid}` and a timestamp within five minutes.
+
+The signed reply includes `request_said`, `mailbox`, and, while work is pending,
+`operation`. Boot uses its existing durable HIO operation runner to call:
+
+```http
+POST <KF_BOOT_MBX_BOOT_URL>/mailboxes
+Content-Type: application/json
+
+{"aid":"<recipient AID>"}
+```
+
+The provider returns `{cid,eid,name,oobis,status:"allocated",url}`. Boot retains
+account ownership and its allocation ID, and publishes:
+
+```json
+{"mailbox_id":"...","recipient_aid":"...","eid":"<operator AID>",
+ "url":"http://127.0.0.1:6732","oobis":[".../oobi/<operator>/controller"],
+ "status":"active"}
+```
+
+Poll the signed `/operations/status` route with `{operation_id}` until state is
+`succeeded` or `failed`. A successful create operation contains `result.mailbox`.
+Only an active allocation is ready for wallet discovery. Boot signs which
+operator was assigned; it does not sign the operator's location on its behalf.
+Resolve the operator OOBI, verify its signed location, then publish the
+recipient-signed mailbox role for that operator. The operator AID differs from
+the Boot service AID.
+
+List with `/account/mailboxes`. Delete with `/account/mailboxes/delete` and
+`{recipient_aid, mailbox_id}`. Pending deletion returns an operation. Backend
+`DELETE /mailboxes/{recipient_aid}` uses the recipient, never the shared operator
+EID. A backend 404 means already removed. Metadata stays until backend removal
+succeeds so failures can retry. Account expiry/deletion uses the same cleanup.
+Removing registration does not promise that the provider purges stored messages.
+
+Configure `KF_BOOT_MBX_BOOT_URL` (default `http://127.0.0.1:6731`). Configure the
+provider's advertised location with `KF_MAILBOX_PUBLIC_URL`. The account allocation
+limit defaults to ten recipients through `KF_BOOT_MAILBOX_LIMIT_PER_ACCOUNT`.
+The provider owns public `PUT /`, native `POST /` query/SSE, message storage,
+retention, request and queue bounds, and read policy. These are no longer Boot
+configuration or guarantees.
+
+Wallet cursors are keyed by recipient and endpoint identity; a new operator
+starts a separate stream. Replace an existing endpoint authorization only after
+the new operator is verified, then exchange fresh introductions with peers.
+
+Boot orchestration tests cover allocation and cleanup against a controlled
+provider. They do not establish standalone provider durability, read policy or
+full SEDI compatibility.
 
 ## Runtime Shape
 
