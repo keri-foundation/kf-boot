@@ -7,14 +7,18 @@ Keep the implementation, README contract, and client integration aligned.
 
 # To run
 
-Install the package in editable mode first so the `src/` layout and console
-script both resolve correctly:
+On macOS, install libsodium and make it available to Python:
 
 ```bash
-python3.14 -m venv .venv
+brew install libsodium
+export DYLD_LIBRARY_PATH="$(brew --prefix libsodium)/lib:${DYLD_LIBRARY_PATH:-}"
+```
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then create the development environment from the lockfile:
+
+```bash
+uv sync --locked --extra dev
 source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
-python -m pip install -e '.[dev]'
 ```
 
 ```
@@ -201,25 +205,24 @@ Required behavior:
 
 ## Development
 
-`kf-boot` runs on Python 3.14 and depends on the local `keripy` / `hio`
-workspace repos for active development in this workspace.
+`kf-boot` uses Python 3.14. The lockfile records its Keripy revision and dependencies.
 
 Create or refresh the local venv:
 
 ```bash
-python3.14 -m venv .venv
+uv sync --locked --extra dev
 source .venv/bin/activate
-python -m pip install -U pip setuptools wheel
-python -m pip install -e '.[dev]'
 ```
 
 Run tests:
 
 ```bash
-source .venv/bin/activate
-pytest tests
-ruff check src tests
+uv run --locked --extra dev pytest tests
+uv run --locked --extra dev ruff check src tests
 ```
+
+To update dependencies, run `uv lock --upgrade-package <package>`, review the
+`uv.lock` diff, and rerun the tests. Commit lockfile changes with the update.
 
 Required environment:
 
