@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "falcon>=4.0.2",
-    "keri @ git+https://github.com/WebOfTrust/keripy.git",
+    "keri @ git+https://github.com/WebOfTrust/keripy.git@7a849d7bfa4d4dcd4068f758691d5c7505462dd5",
     "requests>=2.32.3",
 ]
 
