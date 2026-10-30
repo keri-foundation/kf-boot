@@ -301,6 +301,7 @@ class Config:
                 or mailbox_boot.path not in {"", "/"} or mailbox_boot.query or mailbox_boot.fragment
                 or mailbox_boot.username or mailbox_boot.password):
             raise ValueError("mbx_boot_url must be an HTTP(S) service root.")
+        object.__setattr__(self, "mbx_boot_url", _normalize_url(self.mbx_boot_url))
         if self.bootstrap_api_requests_per_minute < 0:
             raise ValueError("bootstrap_api_requests_per_minute must be greater than or equal to 0.")
         if self.session_ttl_seconds <= 0:

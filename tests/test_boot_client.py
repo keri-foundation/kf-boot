@@ -4,9 +4,12 @@ import json
 from collections import deque
 
 import pytest
+from keri.app import httping
 
 from kfboot.boot_client import BootError, HioBootClient
 from kfboot.utils import bootErrorToHTTP
+
+from .support import make_config
 
 
 class FakeHioClient:
@@ -209,3 +212,19 @@ def test_hio_delete_timeout_removes_client():
     assert str(excinfo.value) == "Boot API request timed out"
     assert excinfo.value.status_code is None
     assert clienter.removed == [hio_client]
+
+
+def test_mailbox_provider_root_with_trailing_slash_builds_valid_http_request(tmp_path):
+    config = make_config(tmp_path, mbx_boot_url="http://127.0.0.1:6731/")
+    clienter = httping.Clienter()
+    clienter.wind(lambda: 0.0)
+    client = HioBootClient(config.mbx_boot_url, clienter=clienter)
+    allocation = client.allocateMailboxDo("recipient", tymth=lambda: 0.0)
+    try:
+        next(allocation)
+        http = clienter.clients[0][0]
+        http.serviceRequests()
+        assert http.requester.msg.startswith(b"POST /mailboxes HTTP/1.1\r\n")
+        assert json.loads(http.requester.body) == {"aid": "recipient"}
+    finally:
+        allocation.close()

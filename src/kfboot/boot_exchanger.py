@@ -528,7 +528,7 @@ class AccountMailboxesHandler(RouteHandler):
 
     def handleEvent(self, serder, **kwa):
         rows = self.exchanger.ctx.store.mailboxes.list(serder.pre)
-        self.reply(serder, {"mailboxes": [mailboxPayload(self.exchanger.ctx, row) for row in rows]})
+        self.reply(serder, {"mailboxes": [mailboxPayload(row) for row in rows]})
 
     def reply(self, serder, payload):
         account = self.exchanger.requireOnboardedAccount(serder.pre, {})
@@ -550,7 +550,7 @@ class AccountMailboxCreateHandler(AccountMailboxesHandler):
             account_aid=serder.pre, recipient_aid=recipient, binding=binding,
             limit=self.exchanger.ctx.config.mailbox_limit_per_account,
         )
-        payload = {"mailbox": mailboxPayload(self.exchanger.ctx, record)}
+        payload = {"mailbox": mailboxPayload(record)}
         if record.status != "active":
             operation = self.exchanger.ctx.store.ensureBootOperation(
                 kind=BOOT_OPERATION_MAILBOX_CREATE, subject=recipient, requester=serder.pre,
@@ -578,7 +578,7 @@ class AccountMailboxDeleteHandler(AccountMailboxesHandler):
                 route=self.resource, payload={"mailbox_id": record.mailbox_id},
             )
         # Report the state the request produced, not the state it replaced.
-        result = {"mailbox": mailboxPayload(self.exchanger.ctx, record)}
+        result = {"mailbox": mailboxPayload(record)}
         if operation is not None:
             result["operation"] = self.exchanger.ctx.store.bootOperationPayload(operation)
         self.reply(serder, result)

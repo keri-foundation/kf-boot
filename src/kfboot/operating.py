@@ -43,7 +43,7 @@ class BootOperationProcessor:
                     record, mailbox_boot=self.mailbox_boot, tymth=tymth, tock=tock,
                 )
             record = self.provisioner.ctx.store.mailboxes.get(operation.subject)
-            return {"mailbox": mailboxPayload(self.provisioner.ctx, record)}
+            return {"mailbox": mailboxPayload(record)}
 
         if operation.kind == BOOT_OPERATION_SESSION_PROVISION:
             session_id = str(operation.payload.get("session_id") or operation.subject)

@@ -80,28 +80,6 @@ class MailboxStore:
             raise RuntimeError("Mailbox registrations must be removed before account metadata")
 
 
-def parseMessages(raw, *, limit=1024):
-    """Extract complete messages without parser dispatch or swallowed errors."""
-    ims = bytearray(raw)
-    parser = Parser(version=Vrsn_2_0)
-    messages = []
-    try:
-        while ims:
-            if len(messages) >= limit:
-                raise ValueError("Too many messages")
-            generator = parser.msgParsator(ims=ims, framed=True, local=False)
-            try:
-                next(generator)
-            except StopIteration as done:
-                messages.append(done.value)
-            else:
-                generator.close()
-                raise ValueError("Incomplete CESR frame")
-    except Exception as exc:
-        raise falcon.HTTPBadRequest(title="Invalid CESR stream") from exc
-    return messages
-
-
 def verifyCurrentSignature(hby, parsed):
     """Require the sender's current signing threshold before any mailbox access."""
     serder = parsed.serder
@@ -135,10 +113,13 @@ def validateBinding(ctx, payload):
     binding = payload.get("binding")
     if not isinstance(binding, str) or len(binding.encode()) > 65536:
         raise falcon.HTTPBadRequest(title="Recipient binding is required")
-    messages = parseMessages(binding.encode())
-    if len(messages) != 1:
+    ims = bytearray(binding.encode())
+    try:
+        parsed = Parser(version=Vrsn_2_0).parseOneBare(ims=ims, local=False, processive=False)
+    except Exception as exc:
+        raise falcon.HTTPBadRequest(title="Invalid CESR stream") from exc
+    if ims:
         raise falcon.HTTPBadRequest(title="One recipient binding is required")
-    parsed = messages[0]
     serder = parsed.serder
     if (serder.ilk != Ilks.exn or serder.pvrsn != Vrsn_2_0
             or serder.route != "/mailbox/bind" or serder.pre != payload.get("recipient_aid")
@@ -155,7 +136,7 @@ def validateBinding(ctx, payload):
     return serder
 
 
-def mailboxPayload(ctx, record):
+def mailboxPayload(record):
     return {"mailbox_id": record.mailbox_id, "recipient_aid": record.recipient_aid,
             "eid": record.eid, "url": record.url, "oobis": list(record.oobis),
             "status": record.status}
