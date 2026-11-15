@@ -116,6 +116,7 @@ class BootstrapConfigEnd:
                     for code in self.ctx.config.bootstrap_account_options
                 ],
                 "watcher_required": self.ctx.config.bootstrap_watcher_required,
+                "mailbox_enabled": bool(self.ctx.config.mbx_boot_url),
             },
             "region": {
                 "id": self.ctx.config.region_id,

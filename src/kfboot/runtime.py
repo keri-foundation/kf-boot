@@ -49,7 +49,11 @@ def build_doers(app, ctx: Context) -> list:
             store=ctx.store,
             witness_boots=operation_witness_boots,
             watcher_boot=operation_watcher_boot,
-            processor=BootOperationProcessor(provisioner=ctx.exchanger.provisioner),
+            processor=BootOperationProcessor(
+                provisioner=ctx.exchanger.provisioner,
+                mailbox_boot=HioBootClient(ctx.config.mbx_boot_url, clienter=operation_clienter,
+                                           timeout=ctx.config.boot_api_timeout_seconds),
+            ),
             clienter=operation_clienter,
             failure_max_attempts=ctx.config.operation_failure_max_attempts,
         )
@@ -73,6 +77,8 @@ def build_doers(app, ctx: Context) -> list:
         ctx.exchanger.provisioner.configureCleanupBootClients(
             witness_boots=cleanup_witness_boots,
             watcher_boot=cleanup_watcher_boot,
+            mailbox_boot=HioBootClient(ctx.config.mbx_boot_url, clienter=clienter,
+                                       timeout=ctx.config.boot_api_timeout_seconds),
         )
         service_doers.append(
             CleanupDoer(
