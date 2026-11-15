@@ -1,0 +1,225 @@
+# Four-host KERI pool — Digital Ocean co-location, local Docker equivalent.
+#
+# From this directory (kf-boot/):
+#   docker compose up -d --build
+#   curl -sS http://127.0.0.1:9723/health
+#   curl -sS http://127.0.0.1:6731/health
+#   curl -sS http://127.0.0.1:6632/health
+#   curl -sS http://127.0.0.1:6633/health
+#   docker compose down -v
+#
+# Host layout (matches full_setup_guide.md / DO):
+#   host-1: kf-boot + witopnet + watopnet
+#   host-2: witopnet + watopnet + kf-registrar
+#   host-3: witopnet + watopnet + kf-observer
+#   host-4: witopnet + watopnet + kf-mailbox
+#
+# Boot plane uses 192.0.2.11–14. Public curls use published localhost ports
+# so Locksmith on the Docker host can reach them.
+# Image packages install from GitHub main (same URLs as full_setup_guide.md §4).
+
+name: kf-boot
+
+x-host-build: &host-build
+  image: kf-boot:latest
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  networks:
+    keri-pool: {}
+  environment:
+    LOGLEVEL: ${LOGLEVEL:-INFO}
+    KERI_BASER_MAP_SIZE: ${KERI_BASER_MAP_SIZE:-2147483648}
+
+services:
+  host-4:
+    <<: *host-build
+    hostname: host-4
+    entrypoint: ["/entrypoint-host4.sh"]
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      KERI_BASER_MAP_SIZE: ${KERI_BASER_MAP_SIZE:-2147483648}
+      HOST_IP: 192.0.2.14
+      PUBLIC_WITNESS_URL: http://127.0.0.1:45632
+      PUBLIC_WATCHER_URL: http://127.0.0.1:47632
+      # Published for Locksmith on the Docker host; boot stays on the pool plane.
+      PUBLIC_MAILBOX_URL: http://127.0.0.1:6732
+    networks:
+      keri-pool:
+        ipv4_address: 192.0.2.14
+    volumes:
+      - host4_wit:/opt/keri/witness/config
+      - host4_wat:/opt/keri/watcher/config
+      - host4_keri:/usr/local/var/keri
+      - host4_mailbox:/opt/keri/mailbox
+      - host4_logs:/var/log/keri
+    ports:
+      # Classic Local Witness 4 ports (Locksmith DEFAULT_DEV_WITNESS_SERVERS)
+      - "5661:5631"
+      - "5662:5632"
+      # Public curls used by kf-boot backends / OOBIs
+      - "45632:5632"
+      - "47632:7632"
+      - "6731:6731"
+      - "6732:6732"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6731/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 15s
+
+  host-3:
+    <<: *host-build
+    hostname: host-3
+    entrypoint: ["/entrypoint-host3.sh"]
+    depends_on:
+      - host-4
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      KERI_BASER_MAP_SIZE: ${KERI_BASER_MAP_SIZE:-2147483648}
+      HOST_IP: 192.0.2.13
+      PUBLIC_WITNESS_URL: http://127.0.0.1:35632
+      PUBLIC_WATCHER_URL: http://127.0.0.1:37632
+      PUBLIC_OBSERVER_URL: http://127.0.0.1:6633
+      INTERNAL_OBSERVER_URL: http://192.0.2.13:6633
+      REGISTRAR_URL: http://192.0.2.12:6632/
+      WITNESS_URL: http://192.0.2.11:5632/
+    networks:
+      keri-pool:
+        ipv4_address: 192.0.2.13
+    volumes:
+      - host3_wit:/opt/keri/witness/config
+      - host3_wat:/opt/keri/watcher/config
+      - host3_keri:/usr/local/var/keri
+      - host3_observer:/opt/keri/observer
+      - tel_shared:/shared
+      - host3_logs:/var/log/keri
+    ports:
+      # Classic Local Witness 3 ports (Locksmith DEFAULT_DEV_WITNESS_SERVERS)
+      - "5651:5631"
+      - "5652:5632"
+      # Public curls used by kf-boot backends / OOBIs
+      - "35632:5632"
+      - "37632:7632"
+      - "6633:6633"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:6633/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 15s
+
+  host-2:
+    <<: *host-build
+    hostname: host-2
+    entrypoint: ["/entrypoint-host2.sh"]
+    depends_on:
+      host-3:
+        condition: service_healthy
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      KERI_BASER_MAP_SIZE: ${KERI_BASER_MAP_SIZE:-2147483648}
+      HOST_IP: 192.0.2.12
+      PUBLIC_WITNESS_URL: http://127.0.0.1:25632
+      PUBLIC_WATCHER_URL: http://127.0.0.1:27632
+      PUBLIC_REGISTRAR_URL: http://127.0.0.1:6632
+    networks:
+      keri-pool:
+        ipv4_address: 192.0.2.12
+    volumes:
+      - host2_wit:/opt/keri/witness/config
+      - host2_wat:/opt/keri/watcher/config
+      - host2_keri:/usr/local/var/keri
+      - host2_registrar:/opt/keri/registrar
+      - tel_shared:/shared
+      - host2_logs:/var/log/keri
+    ports:
+      # Classic Local Witness 2 ports (Locksmith DEFAULT_DEV_WITNESS_SERVERS)
+      - "5641:5631"
+      - "5642:5632"
+      # Public curls used by kf-boot backends / OOBIs
+      - "25632:5632"
+      - "27632:7632"
+      - "6631:6631"
+      - "6632:6632"
+
+  host-1:
+    <<: *host-build
+    hostname: host-1
+    entrypoint: ["/entrypoint-host1.sh"]
+    depends_on:
+      host-2:
+        condition: service_started
+      host-3:
+        condition: service_started
+      host-4:
+        condition: service_healthy
+    environment:
+      LOGLEVEL: ${LOGLEVEL:-INFO}
+      KERI_BASER_MAP_SIZE: ${KERI_BASER_MAP_SIZE:-2147483648}
+      HOST_IP: 192.0.2.11
+      PUBLIC_WITNESS_URL: http://127.0.0.1:5632
+      PUBLIC_WATCHER_URL: http://127.0.0.1:7632
+      KF_BOOT_HOST: 0.0.0.0
+      KF_BOOT_PORT: "9723"
+      KF_BOOT_DB_PATH: /opt/keri/kfboot/var
+      KF_BOOT_KERI_DIR: /opt/keri/kfboot/keri
+      # Boot plane to host-4 mailbox (not loopback).
+      KF_BOOT_MBX_BOOT_URL: http://192.0.2.14:6731
+      KF_BOOT_WITNESS_BACKENDS: "wit-1|http://192.0.2.11:5631|http://127.0.0.1:5632,wit-2|http://192.0.2.12:5631|http://127.0.0.1:25632,wit-3|http://192.0.2.13:5631|http://127.0.0.1:35632,wit-4|http://192.0.2.14:5631|http://127.0.0.1:45632"
+      KF_BOOT_WAT_BOOT_URL: http://192.0.2.11:7631
+      KF_BOOT_WAT_PUBLIC_URL: http://127.0.0.1:7632
+      KF_BOOT_ONBOARDING_PUBLIC_URL: http://127.0.0.1:9723/onboarding
+      KF_BOOT_ACCOUNT_PUBLIC_URL: http://127.0.0.1:9723/account
+      KF_BOOT_BOOTSTRAP_ACCOUNT_OPTIONS: 1-of-1,3-of-4
+      KF_BOOT_ACCOUNT_TTL_SECONDS: "0"
+    networks:
+      keri-pool:
+        ipv4_address: 192.0.2.11
+    volumes:
+      - host1_wit:/opt/keri/witness/config
+      - host1_wat:/opt/keri/watcher/config
+      - host1_keri:/usr/local/var/keri
+      - host1_kfboot_var:/opt/keri/kfboot/var
+      - host1_kfboot_keri:/opt/keri/kfboot/keri
+      - host1_logs:/var/log/keri
+    ports:
+      - "9723:9723"
+      - "5632:5632"
+      - "7632:7632"
+      - "5631:5631"
+      - "7631:7631"
+
+networks:
+  keri-pool:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.0.2.0/24
+          gateway: 192.0.2.1
+
+volumes:
+  host1_wit:
+  host1_wat:
+  host1_keri:
+  host1_kfboot_var:
+  host1_kfboot_keri:
+  host1_logs:
+  host2_wit:
+  host2_wat:
+  host2_keri:
+  host2_registrar:
+  host2_logs:
+  host3_wit:
+  host3_wat:
+  host3_keri:
+  host3_observer:
+  host3_logs:
+  host4_wit:
+  host4_wat:
+  host4_keri:
+  host4_mailbox:
+  host4_logs:
+  tel_shared:
