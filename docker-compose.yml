@@ -1,5 +1,10 @@
 # Four-host KERI pool — Digital Ocean co-location, local Docker equivalent.
 #
+# Expects sibling working trees next to this repo (umbrella layout):
+#   ../keripy ../witness-hk ../watcher-hk ../kf-mailbox ../kf-registrar ../kf-observer
+# Packages install editable from those trees; compose bind-mounts them so
+# local edits are what the containers run (rebuild when deps/metadata change).
+#
 # From this directory (kf-boot/):
 #   docker compose up -d --build
 #   curl -sS http://127.0.0.1:9723/health
@@ -16,7 +21,6 @@
 #
 # Boot plane uses 192.0.2.11–14. Public curls use published localhost ports
 # so Locksmith on the Docker host can reach them.
-# Image packages install from GitHub main (same URLs as full_setup_guide.md §4).
 
 name: kf-boot
 
@@ -25,6 +29,13 @@ x-host-build: &host-build
   build:
     context: .
     dockerfile: docker/Dockerfile
+    additional_contexts:
+      keripy: ../keripy
+      witness-hk: ../witness-hk
+      watcher-hk: ../watcher-hk
+      kf-mailbox: ../kf-mailbox
+      kf-registrar: ../kf-registrar
+      kf-observer: ../kf-observer
   restart: unless-stopped
   networks:
     keri-pool: {}
@@ -49,6 +60,13 @@ services:
       keri-pool:
         ipv4_address: 192.0.2.14
     volumes:
+      - ../keripy:/opt/src/keripy
+      - ../witness-hk:/opt/src/witness-hk
+      - ../watcher-hk:/opt/src/watcher-hk
+      - ../kf-mailbox:/opt/src/kf-mailbox
+      - ../kf-registrar:/opt/src/kf-registrar
+      - ../kf-observer:/opt/src/kf-observer
+      - .:/opt/src/kf-boot
       - host4_wit:/opt/keri/witness/config
       - host4_wat:/opt/keri/watcher/config
       - host4_keri:/usr/local/var/keri
@@ -90,6 +108,13 @@ services:
       keri-pool:
         ipv4_address: 192.0.2.13
     volumes:
+      - ../keripy:/opt/src/keripy
+      - ../witness-hk:/opt/src/witness-hk
+      - ../watcher-hk:/opt/src/watcher-hk
+      - ../kf-mailbox:/opt/src/kf-mailbox
+      - ../kf-registrar:/opt/src/kf-registrar
+      - ../kf-observer:/opt/src/kf-observer
+      - .:/opt/src/kf-boot
       - host3_wit:/opt/keri/witness/config
       - host3_wat:/opt/keri/watcher/config
       - host3_keri:/usr/local/var/keri
@@ -129,6 +154,13 @@ services:
       keri-pool:
         ipv4_address: 192.0.2.12
     volumes:
+      - ../keripy:/opt/src/keripy
+      - ../witness-hk:/opt/src/witness-hk
+      - ../watcher-hk:/opt/src/watcher-hk
+      - ../kf-mailbox:/opt/src/kf-mailbox
+      - ../kf-registrar:/opt/src/kf-registrar
+      - ../kf-observer:/opt/src/kf-observer
+      - .:/opt/src/kf-boot
       - host2_wit:/opt/keri/witness/config
       - host2_wat:/opt/keri/watcher/config
       - host2_keri:/usr/local/var/keri
@@ -179,6 +211,13 @@ services:
       keri-pool:
         ipv4_address: 192.0.2.11
     volumes:
+      - ../keripy:/opt/src/keripy
+      - ../witness-hk:/opt/src/witness-hk
+      - ../watcher-hk:/opt/src/watcher-hk
+      - ../kf-mailbox:/opt/src/kf-mailbox
+      - ../kf-registrar:/opt/src/kf-registrar
+      - ../kf-observer:/opt/src/kf-observer
+      - .:/opt/src/kf-boot
       - host1_wit:/opt/keri/witness/config
       - host1_wat:/opt/keri/watcher/config
       - host1_keri:/usr/local/var/keri

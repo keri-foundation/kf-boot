@@ -1081,7 +1081,7 @@ docker compose exec host-1 bash   # or sh
 docker compose down -v
 ```
 
-The image installs the same GitHub sources as §4 (`keripy`, `witness-hk`, `watcher-hk`, `kf-boot`, `kf-registrar`, `kf-observer`, `kf-mailbox`).
+**Local sources (not §4 GitHub installs):** compose expects sibling working trees next to `kf-boot/` in the umbrella layout (`keripy`, `witness-hk`, `watcher-hk`, `kf-mailbox`, `kf-registrar`, `kf-observer`). The image installs those packages editable into `/opt/src/...`, and compose bind-mounts the same host paths so containers run your local branches. Rebuild when dependency or packaging metadata changes; ordinary code edits do not require a rebuild. Bare-metal / production hosts still follow §4 (GitHub main).
 
 Compose env equivalents of this guide:
 
