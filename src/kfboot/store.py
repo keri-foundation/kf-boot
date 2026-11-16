@@ -43,6 +43,7 @@ from kfboot.basing import (
     SessionRecord,
     open_baser,
 )
+from kfboot.mailboxing import MailboxStore
 
 
 def nowIso() -> str:
@@ -186,6 +187,7 @@ class Store:
         expired_account_retention_seconds: float = 0.0,
     ):
         self.baser = open_baser(path)
+        self.mailboxes = MailboxStore(self.baser)
         self.session_ttl_seconds = session_ttl_seconds
         self.account_ttl_seconds = account_ttl_seconds
         self.closed_session_retention_seconds = closed_session_retention_seconds
@@ -2041,6 +2043,7 @@ class Store:
         return self.baser.accounts.get(keys=(account_aid,))
 
     def deleteAccount(self, account_aid: str) -> None:
+        self.mailboxes.deleteAccount(account_aid)
         # Remove cleanup task related to this account
         self._deleteCleanupTaskIfPresent(CLEANUP_TASK_ACCOUNT_EXPIRE, account_aid)
         self._deleteCleanupTaskIfPresent(CLEANUP_TASK_ACCOUNT_CLEANUP, account_aid)

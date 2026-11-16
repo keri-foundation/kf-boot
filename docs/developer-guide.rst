@@ -1,9 +1,9 @@
 Developer Guide
 ===============
 
-``kf-boot`` is the KERI Foundation boot service for hosted witness and watcher
-onboarding. It provides public bootstrap discovery, authenticated onboarding,
-approved-account management, and signed boot-server replies.
+``kf-boot`` provides KERI Foundation account onboarding, hosted witnesses and
+watchers, and account registrations on the standalone mailbox provider. It
+signs account management replies; public message transport runs in kf-mailbox.
 
 Environment
 -----------
@@ -47,6 +47,7 @@ Set environment variables pointing to the witness and watcher services:
    export KF_BOOT_WIT_PUBLIC_URL=http://127.0.0.1:5632
    export KF_BOOT_WAT_BOOT_URL=http://127.0.0.1:7631
    export KF_BOOT_WAT_PUBLIC_URL=http://127.0.0.1:7632
+   export KF_BOOT_MBX_BOOT_URL=http://127.0.0.1:6731
 
 Then start the service:
 
@@ -71,6 +72,8 @@ kf-boot implements two public trust domains:
 - **Approved-account surface** (``/account``): management for already-onboarded
   accounts. Lists provisioned witnesses and watchers, updates resources, and
   deletes accounts.
+
+The separate ``kf-mailbox`` process owns public forwarding, polling and OOBIs.
 
 The service communicates with witness and watcher boot APIs to allocate and
 deallocate resources. It does not create local AIDs, hold keys, sign on behalf
@@ -153,8 +156,10 @@ Once onboarded, query account resources:
 HTTP API Reference
 ------------------
 
-All endpoints use the CESR content type. Requests include a CESR body with
-endorsement attachments in the ``CESR-ATTACHMENT`` header.
+Account and onboarding requests use the CESR content type and endorsement
+attachments in the ``CESR-ATTACHMENT`` header. Public mailbox traffic goes to
+``kf-mailbox``: ``PUT`` deposits carry complete CESR streams in the body, and
+queries use the same body/header format and receive SSE responses.
 
 Onboarding (``/onboarding``)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -186,6 +191,28 @@ Account (``/account``)
      - ``/account``
      - Approved-account management. Routes via EXN message ``r`` field:
        ``/account/witnesses``, ``/account/watchers``, ``/account/delete``
+       ``/account/mailboxes``, ``/account/mailboxes/create``,
+       ``/account/mailboxes/delete``.
+
+Mailbox setup
+~~~~~~~~~~~~~
+
+Complete account onboarding, introduce the recipient KEL and send the account
+request with a recipient-signed binding. Follow the existing operation status
+API until allocation completes. Verify the correlated Boot reply, resolve the
+returned operator OOBI, and verify the operator's signed location. The recipient
+then authorizes that operator for the mailbox role. Boot and mailbox have
+separate identities. Boot accepts a binding for five minutes and tolerates a
+wallet clock up to 30 seconds ahead.
+
+Boot calls the provider private API with cooperative HIO clients from its
+operation and cleanup runners. Falcon handlers only queue durable work and
+return signed state; they never wait on blocking provider HTTP. Metadata stays
+on failure until backend registration removal is confirmed.
+
+See ``Credential Mailboxes`` in the README for exact payloads, configuration
+and runtime proof boundaries. Public native clients send to the provider root,
+not Boot. Message retention and read policy belong to the provider.
 
 Testing
 -------

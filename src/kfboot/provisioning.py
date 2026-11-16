@@ -8,6 +8,9 @@ import falcon
 from keri import help
 
 from kfboot.basing import (
+    ACCOUNT_STATE_ONBOARDED,
+    BOOT_OPERATION_MAILBOX_CREATE,
+    BOOT_OPERATION_PENDING,
     SESSION_STATE_CANCELLED,
     SESSION_STATE_EXPIRED,
     SESSION_STATE_FAILED,
@@ -30,11 +33,76 @@ class Provisioner:
         self.ctx = ctx
         self.exchanger = exchanger
         self.cleanup_witness_boots: dict[str, Any] = {}
+        self.mailbox_deletions: set[tuple[str, str]] = set()
+        self.cleanup_mailbox_boot: Any | None = None
         self.cleanup_watcher_boot: Any | None = None
 
-    def configureCleanupBootClients(self, *, witness_boots, watcher_boot) -> None:
+    def configureCleanupBootClients(self, *, witness_boots, watcher_boot, mailbox_boot=None) -> None:
         self.cleanup_witness_boots = witness_boots
+        self.cleanup_mailbox_boot = mailbox_boot
         self.cleanup_watcher_boot = watcher_boot
+
+    def allocateMailboxDo(self, record, *, mailbox_boot, tymth, tock=0.0):
+        if record.status != "pending":
+            return
+        account = self.ctx.store.getAccount(record.account_aid)
+        if (account is None or account.status != ACCOUNT_STATE_ONBOARDED
+                or self.exchanger.activeAccountDeleteOperation(record.account_aid) is not None):
+            record.status = "deleting"
+            self.ctx.store.mailboxes.save(record)
+            return
+        if mailbox_boot is None:
+            raise BootError("Mailbox provider is not configured", status_code=503)
+        allocated = yield from mailbox_boot.allocateMailboxDo(record.recipient_aid, tymth=tymth, tock=tock)
+        if (allocated.get("cid") != record.recipient_aid or not allocated.get("eid")
+                or not allocated.get("url") or not allocated.get("oobis")
+                or allocated.get("status") != "allocated"):
+            raise BootError("Mailbox provider returned an incomplete allocation", status_code=502)
+        current = self.ctx.store.mailboxes.get(record.recipient_aid)
+        current.eid, current.url = allocated["eid"], allocated["url"]
+        current.oobis = list(allocated["oobis"])
+        # Expiry cleanup can mark the registration deleting during the HTTP wait.
+        if current.status == "pending":
+            current.status = "active"
+        self.ctx.store.mailboxes.save(current)
+
+    def deleteMailboxDo(self, record, *, mailbox_boot=None, tymth, tock=0.0):
+        key = (record.recipient_aid, record.mailbox_id)
+        while key in self.mailbox_deletions:
+            yield tock
+        current = self.ctx.store.mailboxes.get(record.recipient_aid)
+        if current is None or current.mailbox_id != record.mailbox_id or current.status == "deleted":
+            return
+        record = current
+        self.mailbox_deletions.add(key)
+        try:
+            record.status = "deleting"
+            self.ctx.store.mailboxes.save(record)
+            while (operation := self.ctx.store.findActiveBootOperation(
+                    kind=BOOT_OPERATION_MAILBOX_CREATE, subject=record.recipient_aid,
+                    requester=record.account_aid)) is not None:
+                if operation.state == BOOT_OPERATION_PENDING:
+                    # A queued retry must not recreate a registration after cleanup.
+                    self.ctx.store.failBootOperation(operation.operation_id,
+                        last_error="Mailbox allocation cancelled by deletion", result={})
+                else:
+                    yield tock
+            mailbox_boot = mailbox_boot or self.cleanup_mailbox_boot
+            if mailbox_boot is None:
+                raise BootError("Mailbox provider is not configured", status_code=503)
+            try:
+                yield from mailbox_boot.deleteMailboxDo(record.recipient_aid, tymth=tymth, tock=tock)
+            except BootError as exc:
+                if exc.status_code != 404:
+                    raise
+            self.ctx.store.mailboxes.delete(record.recipient_aid, account_aid=record.account_aid,
+                                            mailbox_id=record.mailbox_id)
+        finally:
+            self.mailbox_deletions.remove(key)
+
+    def deleteAccountMailboxesDo(self, account_aid, *, mailbox_boot=None, tymth, tock=0.0):
+        for record in self.ctx.store.mailboxes.list(account_aid):
+            yield from self.deleteMailboxDo(record, mailbox_boot=mailbox_boot, tymth=tymth, tock=tock)
 
     def provisionSessionResourcesDo(
         self,
@@ -383,6 +451,7 @@ class Provisioner:
         tymth,
         tock: float = 0.0,
     ):
+        yield from self.deleteAccountMailboxesDo(account_aid, tymth=tymth, tock=tock)
         sessions = self.ctx.store.listSessionsForAccount(account_aid)
         operations = self._accountResourceDeleteOps(
             account_aid=account_aid,
@@ -418,9 +487,12 @@ class Provisioner:
         account=None,
         witness_boots=None,
         watcher_boot=None,
+        mailbox_boot=None,
         tymth,
         tock: float = 0.0,
     ):
+        yield from self.deleteAccountMailboxesDo(
+            account_aid, mailbox_boot=mailbox_boot, tymth=tymth, tock=tock)
         sessions = self.ctx.store.listSessionsForAccount(account_aid)
         operations = self._accountResourceDeleteOps(
             account_aid=account_aid,

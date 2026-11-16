@@ -64,6 +64,7 @@ def test_public_discovery_stays_plain_json_and_reply_frames_prepend_boot_kel(con
                 {"code": "3-of-4", "witness_count": 4, "toad": 3},
             ],
             "watcher_required": True,
+            "mailbox_enabled": True,
         },
         "region": {"id": "test-region", "name": "Test Region"},
         "surfaces": {
